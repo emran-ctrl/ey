@@ -10,7 +10,7 @@ PLATFORMS := linux/amd64 linux/arm64 darwin/amd64 darwin/arm64
 IMAGE := ey
 TAG   := $(VERSION)
 
-.PHONY: build run test vet fmt lint dist docker docker-run clean
+.PHONY: build run test vet fmt lint dist snapshot docker docker-run clean
 
 build:
 	go build -trimpath -ldflags '$(LDFLAGS)' -o $(BIN)/$(BINARY) $(PKG)
@@ -41,6 +41,10 @@ dist:
 
 clean:
 	rm -rf $(BIN)
+
+# Build release artifacts locally without publishing (requires goreleaser).
+snapshot:
+	goreleaser release --snapshot --clean
 
 docker:
 	docker build --build-arg VERSION=$(VERSION) -t $(IMAGE):$(TAG) .
