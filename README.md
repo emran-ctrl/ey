@@ -1,0 +1,384 @@
+# ey
+
+[![CI](https://github.com/emran-ctrl/ey/actions/workflows/ci.yml/badge.svg)](https://github.com/emran-ctrl/ey/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/emran-ctrl/ey)](https://github.com/emran-ctrl/ey/releases)
+
+A small, dependency-free CLI system monitor written in Go. `ey` samples disk,
+memory, and CPU usage, compares them against configurable thresholds, and fires
+a webhook alert (Slack, Discord, or a generic JSON endpoint) when a limit is
+exceeded. It runs either as a one-shot check or as a long-lived daemon.
+
+- Single static binary — no runtime dependencies
+- One-shot or daemon mode
+- Slack / Discord / generic webhook payloads with automatic detection
+- Alert policies: `always`, `once`, or `cooldown` (persisted across restarts)
+- Robust webhook delivery: retries on transport errors, `429`, and `5xx`
+  with exponential backoff, full jitter, and `Retry-After` support
+- Structured logging (`text` or `json`) to stderr, machine-readable metrics to
+  stdout (`-json`)
+- Docker image and hardened systemd units included
+
+## Contents
+
+- [Install](#install)
+- [Quick start](#quick-start)
+- [Usage](#usage)
+- [Configuration](#configuration)
+  - [Flags and environment variables](#flags-and-environment-variables)
+  - [Alert formats](#alert-formats)
+  - [Alert modes](#alert-modes)
+  - [State persistence](#state-persistence)
+  - [Webhook retries](#webhook-retries)
+- [Deployment](#deployment)
+  - [Docker](#docker)
+  - [systemd](#systemd)
+- [Output](#output)
+- [Exit codes](#exit-codes)
+- [Building from source](#building-from-source)
+- [Development](#development)
+- [Releasing](#releasing)
+- [Project layout](#project-layout)
+
+## Install
+
+**Prebuilt binaries** — download the archive for your platform from the
+[releases page](https://github.com/emran-ctrl/ey/releases) and extract `ey`:
+
+```console
+tar -xzf ey_<version>_linux_amd64.tar.gz
+install -m 0755 ey /usr/local/bin/ey
+```
+
+**Docker** (multi-arch image on GHCR):
+
+```console
+docker pull ghcr.io/emran-ctrl/ey:latest
+```
+
+**From source** — requires Go 1.27:
+
+```console
+go install ./cmd/ey        # or: make build
+```
+
+## Quick start
+
+Run a single check against `/` with the default thresholds (disk 80%, memory
+90%, CPU 90%):
+
+```console
+ey
+```
+
+```text
+System Status Check - 09 Oct 26 15:02 EAT
+Disk Usage: 43.19% (202.0/474.9 GiB) @ /
+RAM Usage:  68.65% (10.5/15.3 GiB)
+CPU Usage:  3.38%
+Status: OK (all thresholds satisfied)
+```
+
+Send an alert to Slack when any threshold is breached:
+
+```console
+ey -webhook 'https://hooks.slack.com/services/XXX/YYY/ZZZ'
+```
+
+Run continuously, checking every 30 seconds, alerting at most once per hour:
+
+```console
+ey -daemon -interval 30s -alert-mode cooldown -cooldown 1h \
+   -webhook 'https://hooks.slack.com/services/XXX/YYY/ZZZ'
+```
+
+## Usage
+
+```text
+ey [flags]
+```
+
+Common invocations:
+
+```console
+# Emit metrics as JSON (handy for scripts and piping into jq).
+ey -json | jq .disk_used_percent
+
+# Fail the process when a threshold is breached (for cron / CI / systemd).
+ey -exit-code
+
+# Watch /data instead of /, warn at 90% disk.
+ey -path /data -disk-threshold 90
+
+# Daemon with JSON logs and a generic webhook.
+ey -daemon -log-format json -format generic -webhook https://example.com/hook
+```
+
+Run `ey -h` to print the built-in flag help.
+
+## Configuration
+
+Precedence is **flag > environment variable > built-in default**. Every flag has
+an `EY_*` environment variable equivalent (except `-version`), which is useful
+for containers and systemd `EnvironmentFile`s.
+
+### Flags and environment variables
+
+| Flag | Environment | Default | Description |
+| --- | --- | --- | --- |
+| `-disk-threshold` | `EY_DISK_THRESHOLD` | `80` | Disk usage percent that triggers an alert (0–100). |
+| `-mem-threshold` | `EY_MEM_THRESHOLD` | `90` | Memory usage percent that triggers an alert (0–100). |
+| `-cpu-threshold` | `EY_CPU_THRESHOLD` | `90` | CPU usage percent that triggers an alert (0–100). |
+| `-path` | `EY_PATH` | `/` | Filesystem path whose usage is checked. |
+| `-webhook` | `EY_WEBHOOK` | *(none)* | Slack, Discord, or generic webhook URL. |
+| `-format` | `EY_FORMAT` | `auto` | Payload format: `auto`, `slack`, `discord`, or `generic`. |
+| `-daemon` | `EY_DAEMON` | `false` | Run continuously instead of a single check. |
+| `-interval` | `EY_INTERVAL` | `60s` | Delay between checks in daemon mode. |
+| `-alert-mode` | `EY_ALERT_MODE` | `always` | Alert policy: `always`, `once`, or `cooldown`. |
+| `-cooldown` | `EY_COOLDOWN` | `10m` | Minimum time between alerts in `cooldown` mode. |
+| `-timeout` | `EY_TIMEOUT` | `5s` | HTTP client timeout for webhook delivery. |
+| `-json` | `EY_JSON` | `false` | Emit metrics as JSON to stdout. |
+| `-exit-code` | `EY_EXIT_CODE` | `false` | Exit `1` when any threshold is breached. |
+| `-log-format` | `EY_LOG_FORMAT` | `text` | Log output format: `text` or `json`. |
+| `-log-level` | `EY_LOG_LEVEL` | `info` | Log level: `debug`, `info`, `warn`, or `error`. |
+| `-quiet` | `EY_QUIET` | `false` | Suppress the metrics block (logs still go to stderr). |
+| `-retries` | `EY_RETRIES` | `3` | Retries after the first webhook attempt (`0` disables). |
+| `-retry-backoff` | `EY_RETRY_BACKOFF` | `500ms` | Base delay for retry backoff. |
+| `-state-file` | `EY_STATE_FILE` | *(per-user state dir)* | Override the alert state file path. |
+| `-no-state` | `EY_NO_STATE` | `false` | Disable persisting alert state to disk. |
+| `-version` | — | | Print version and exit. |
+
+An invalid `EY_*` value is reported only when the matching flag is not set
+explicitly, since an explicit flag takes precedence over the environment.
+
+### Alert formats
+
+`-format auto` (the default) detects the payload shape from the webhook host:
+`*.slack.com` → Slack, `discord.com` / `discordapp.com` → Discord, everything
+else → generic.
+
+- **Slack** — `{"text": ":rotating_light: *System alert* — …"}`
+- **Discord** — `{"content": ":rotating_light: *System alert* — …"}`
+- **Generic** — the full structured payload:
+
+  ```json
+  {
+    "snapshot": {
+      "timestamp": "2026-10-09T15:02:15+03:00",
+      "disk_used_percent": 91.2,
+      "disk_total_bytes": 509943480320,
+      "disk_used_bytes": 465000000000,
+      "mem_used_percent": 68.5,
+      "mem_total_bytes": 16428015616,
+      "mem_used_bytes": 11264143360,
+      "cpu_used_percent": 12.4
+    },
+    "breaches": [
+      {"metric": "disk", "value": 91.2, "threshold": 80}
+    ]
+  }
+  ```
+
+### Alert modes
+
+- **`always`** — alert on every check that breaches a threshold.
+- **`once`** — alert the first time a threshold is breached, then stay silent
+  until all metrics recover; re-arms on recovery.
+- **`cooldown`** — alert at most once per `-cooldown`, then suppress further
+  alerts for that window.
+
+`once` and `cooldown` state is persisted to disk so it survives daemon restarts
+and separate process invocations (e.g. a systemd timer).
+
+### State persistence
+
+By default alert state is stored in a per-user location:
+
+| Platform | Path |
+| --- | --- |
+| Linux / BSD | `$XDG_STATE_HOME/ey/state.json` or `~/.local/state/ey/state.json` |
+| Other | `$(os.UserConfigDir)/ey/state.json` |
+
+The file is written atomically (`0600`) and recovers gracefully from a missing
+or corrupt file. Override the location with `-state-file`, or disable
+persistence entirely with `-no-state`. The bundled systemd units set
+`XDG_STATE_HOME` to the unit's `StateDirectory` (`/var/lib/ey`).
+
+### Webhook retries
+
+Delivery retries transport failures, `429`, and `5xx` responses; other `4xx`
+responses are returned immediately and never retried. Backoff is exponential
+with full jitter, capped at 8s, and respects a server `Retry-After` header as a
+lower bound. Each attempt is bounded by `-timeout`, and cancelling the process
+(SIGINT/SIGTERM) aborts in-flight requests and backoff waits. Set `-retries 0`
+to disable retries.
+
+## Deployment
+
+### Docker
+
+The image is built from `gcr.io/distroless/static-debian12:nonroot` (it ships CA
+certificates for HTTPS webhooks and runs as a non-root user). Build and run
+locally with the Makefile:
+
+```console
+make docker        # docker build -t ey:<version> .
+make docker-run    # runs against the host root filesystem
+```
+
+To inspect the host's disk, mount it and point `-path` at the mount point:
+
+```console
+docker run --rm --pid=host -v /:/host:ro ghcr.io/emran-ctrl/ey:latest \
+  -path /host -disk-threshold 85 -webhook https://hooks.slack.com/...
+```
+
+The image's default command is `-json`; pass `-daemon` to run continuously:
+
+```console
+docker run -d --name ey --pid=host -v /:/host:ro \
+  -e EY_WEBHOOK=https://hooks.slack.com/... \
+  -e EY_ALERT_MODE=cooldown \
+  ghcr.io/emran-ctrl/ey:latest -path /host -daemon
+```
+
+### systemd
+
+Hardened units are provided in [`deploy/`](deploy):
+
+| Unit | Purpose |
+| --- | --- |
+| `ey.service` | Long-running daemon (`Type=simple`). |
+| `ey-alert.service` | One-shot check with `-exit-code` (breach ⇒ failed unit). |
+| `ey-alert.timer` | Runs `ey-alert.service` every 5 minutes. |
+| `ey.env.example` | Example `EnvironmentFile` with all `EY_*` settings. |
+
+All units source `/etc/ey/ey.env`, use `StateDirectory=ey` (so alert state lands
+in `/var/lib/ey`), and apply sandboxing (`ProtectSystem=strict`, `ProtectHome`,
+`NoNewPrivileges`, empty capability set, and more).
+
+Install:
+
+```console
+sudo install -m 0755 ey /usr/local/bin/ey
+sudo install -d /etc/ey
+sudo install -m 0640 deploy/ey.env.example /etc/ey/ey.env
+sudo install -m 0644 deploy/ey.service deploy/ey-alert.service \
+  deploy/ey-alert.timer /etc/systemd/system/
+sudo systemctl daemon-reload
+```
+
+Then enable the daemon, the timer, or both:
+
+```console
+sudo systemctl enable --now ey.service          # continuous daemon
+sudo systemctl enable --now ey-alert.timer      # periodic one-shot
+```
+
+Edit `/etc/ey/ey.env` to set your webhook and thresholds before starting.
+
+## Output
+
+Human-readable output goes to **stdout**; structured logs go to **stderr**.
+`-json` prints a single pretty-printed object in one-shot mode, or compact
+NDJSON (one object per line) in daemon mode. In daemon mode the metrics block is
+suppressed unless `-json` is set, so normal operation relies on logs.
+
+One-shot JSON:
+
+```json
+{
+  "timestamp": "2026-10-09T15:02:15.046869595+03:00",
+  "disk_used_percent": 43.18948872347831,
+  "disk_total_bytes": 509943480320,
+  "disk_used_bytes": 216846901248,
+  "mem_used_percent": 68.56667063932744,
+  "mem_total_bytes": 16428015616,
+  "mem_used_bytes": 11264143360,
+  "cpu_used_percent": 3.7313432849765538
+}
+```
+
+`breaches` is included only when at least one threshold is exceeded.
+
+## Exit codes
+
+| Code | Meaning |
+| --- | --- |
+| `0` | Success (or no breach without `-exit-code`). |
+| `1` | A threshold was breached and `-exit-code` was set. |
+| `2` | Configuration error, or metrics could not be collected. |
+
+## Building from source
+
+Requires **Go 1.27**. Git is optional (used to derive the version string;
+otherwise the version is `dev`).
+
+```console
+make build     # -> bin/ey
+make dist      # cross-compile: linux/darwin × amd64/arm64 -> bin/ey-<os>-<arch>
+make run       # go run ./cmd/ey ARGS="..."
+make snapshot  # release artifacts to dist/ (requires goreleaser)
+make clean
+```
+
+`make` targets:
+
+| Target | Description |
+| --- | --- |
+| `build` | Build the binary for the host platform. |
+| `run` | `go run` the CLI; pass flags via `ARGS="..."`. |
+| `test` | `go test ./...` |
+| `vet` | `go vet ./...` |
+| `fmt` | `gofmt -l -w .` |
+| `lint` | `fmt` + `vet` + `test`. |
+| `dist` | Cross-compile release binaries. |
+| `snapshot` | Build release artifacts locally with goreleaser. |
+| `docker` / `docker-run` | Build / run the container image. |
+| `clean` | Remove `bin/`. |
+
+## Development
+
+```console
+make lint        # gofmt check + go vet + tests
+go test -race ./...
+```
+
+The version is injected at build time into
+`ey/internal/config.BuildVersion` via `-ldflags`:
+
+```console
+go build -ldflags "-X ey/internal/config.BuildVersion=$(git describe --tags)" ./cmd/ey
+```
+
+CI (`.github/workflows/ci.yml`) runs gofmt, vet, tests, a `-race` job, and a
+build + smoke test on every push and pull request.
+
+## Releasing
+
+Releases are automated with [GoReleaser](https://goreleaser.com) and GitHub
+Actions (`.github/workflows/release.yml`). Pushing a semver tag builds
+linux/darwin archives for amd64/arm64, generates checksums, publishes a GitHub
+Release, and pushes a multi-arch image to GHCR:
+
+```console
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+## Project layout
+
+```text
+cmd/ey/            CLI entry point, flag wiring, daemon loop, alert policy
+internal/config/   Flag + EY_* environment parsing and validation
+internal/monitor/  Metric collection (gopsutil) and threshold evaluation
+internal/alerter/  Webhook payload formatting and retrying HTTP delivery
+internal/state/    Atomic JSON state persistence
+deploy/            systemd units and example EnvironmentFile
+```
+
+## Requirements
+
+- **Build:** Go 1.27
+- **Runtime:** none — the binary is static (Linux/macOS, amd64/arm64)
+- **Optional:** Docker (container image), systemd (service units),
+  GoReleaser (release artifacts)

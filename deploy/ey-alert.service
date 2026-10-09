@@ -1,6 +1,6 @@
 [Unit]
 Description=ey one-shot system health check
-Documentation=https://example.invalid/ey
+Documentation=https://github.com/emran-ctrl/ey
 After=network-online.target
 Wants=network-online.target
 
