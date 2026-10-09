@@ -4,10 +4,14 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"log/slog"
+	"math/rand/v2"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -15,23 +19,62 @@ import (
 	"ey/internal/monitor"
 )
 
-// Client delivers threshold-breach alerts to an external webhook.
-type Client struct {
-	url    string
-	format config.Format
-	http   *http.Client
+// defaultMaxBackoff caps the exponential retry delay.
+const defaultMaxBackoff = 8 * time.Second
+
+// Options configures a Client.
+type Options struct {
+	Format     config.Format
+	Timeout    time.Duration
+	Retries    int
+	Backoff    time.Duration
+	MaxBackoff time.Duration
+	Logger     *slog.Logger
 }
 
-// New builds a Client. format is resolved from auto-detection when set to
-// config.FormatAuto.
-func New(webhook string, format config.Format, timeout time.Duration) *Client {
+// Client delivers threshold-breach alerts to an external webhook.
+type Client struct {
+	url        string
+	format     config.Format
+	http       *http.Client
+	timeout    time.Duration
+	retries    int
+	backoff    time.Duration
+	maxBackoff time.Duration
+	logger     *slog.Logger
+}
+
+// New builds a Client. Format is resolved from auto-detection when set to
+// config.FormatAuto. Zero-valued Options fields fall back to sensible defaults.
+func New(webhook string, opts Options) *Client {
+	format := opts.Format
 	if format == config.FormatAuto {
 		format = detect(webhook)
 	}
+	if opts.Timeout <= 0 {
+		opts.Timeout = 5 * time.Second
+	}
+	if opts.Retries < 0 {
+		opts.Retries = 0
+	}
+	if opts.Backoff <= 0 {
+		opts.Backoff = 500 * time.Millisecond
+	}
+	if opts.MaxBackoff <= 0 {
+		opts.MaxBackoff = defaultMaxBackoff
+	}
+	if opts.Logger == nil {
+		opts.Logger = slog.Default()
+	}
 	return &Client{
-		url:    webhook,
-		format: format,
-		http:   &http.Client{Timeout: timeout},
+		url:        webhook,
+		format:     format,
+		http:       &http.Client{Timeout: opts.Timeout},
+		timeout:    opts.Timeout,
+		retries:    opts.Retries,
+		backoff:    opts.Backoff,
+		maxBackoff: opts.MaxBackoff,
+		logger:     opts.Logger,
 	}
 }
 
@@ -84,8 +127,10 @@ func message(breaches []monitor.Breach, s monitor.Snapshot) string {
 	return b.String()
 }
 
-// Send posts the alert payload to the webhook. It returns an error for
-// transport failures and non-2xx responses.
+// Send posts the alert payload to the webhook, retrying transport failures,
+// 429s, and 5xx responses with exponential backoff and full jitter. Other 4xx
+// responses are returned immediately. Each attempt is bounded by the client
+// timeout; cancellation of ctx aborts both requests and backoff waits.
 func (c *Client) Send(ctx context.Context, breaches []monitor.Breach, s monitor.Snapshot) error {
 	if c.url == "" {
 		return fmt.Errorf("no webhook URL configured")
@@ -94,21 +139,138 @@ func (c *Client) Send(ctx context.Context, breaches []monitor.Breach, s monitor.
 	if err != nil {
 		return fmt.Errorf("marshal payload: %w", err)
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.url, bytes.NewReader(body))
+
+	var lastErr error
+	for attempt := 0; attempt <= c.retries; attempt++ {
+		if attempt > 0 {
+			delay := c.backoffDelay(attempt, lastRetryAfter(lastErr))
+			c.logger.Warn("retrying webhook delivery",
+				"attempt", attempt+1, "of", c.retries+1, "retry_in", delay, "err", lastErr)
+			if err := sleep(ctx, delay); err != nil {
+				return fmt.Errorf("retry aborted: %w", err)
+			}
+		}
+
+		retryable, retryAfter, err := c.attempt(ctx, body)
+		if err == nil {
+			return nil
+		}
+		lastErr = &retryError{err: err, retryAfter: retryAfter}
+
+		if !retryable {
+			return err
+		}
+		if attempt == c.retries {
+			if c.retries == 0 {
+				return err
+			}
+			return fmt.Errorf("giving up after %d attempts: %w", c.retries+1, err)
+		}
+	}
+	return lastErr
+}
+
+// attempt performs a single POST. It reports whether the failure is retryable
+// and any Retry-After hint from the server.
+func (c *Client) attempt(ctx context.Context, body []byte) (bool, time.Duration, error) {
+	attemptCtx, cancel := context.WithTimeout(ctx, c.timeout)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(attemptCtx, http.MethodPost, c.url, bytes.NewReader(body))
 	if err != nil {
-		return fmt.Errorf("build request: %w", err)
+		return false, 0, fmt.Errorf("build request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return fmt.Errorf("post webhook: %w", err)
+		return true, 0, fmt.Errorf("post webhook: %w", err)
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode < 200 || resp.StatusCode > 299 {
-		msg, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		return fmt.Errorf("webhook returned %s: %s", resp.Status, strings.TrimSpace(string(msg)))
+	if resp.StatusCode >= 200 && resp.StatusCode <= 299 {
+		io.Copy(io.Discard, resp.Body)
+		return false, 0, nil
 	}
-	return nil
+
+	msg, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+	err = fmt.Errorf("webhook returned %s: %s", resp.Status, strings.TrimSpace(string(msg)))
+
+	retryable := resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500
+	return retryable, parseRetryAfter(resp.Header.Get("Retry-After")), err
+}
+
+// retryError carries a server Retry-After hint alongside the error.
+type retryError struct {
+	err        error
+	retryAfter time.Duration
+}
+
+func (e *retryError) Error() string { return e.err.Error() }
+func (e *retryError) Unwrap() error { return e.err }
+
+func lastRetryAfter(err error) time.Duration {
+	var re *retryError
+	if errors.As(err, &re) {
+		return re.retryAfter
+	}
+	return 0
+}
+
+// backoffDelay returns the wait before retry number attempt (1-based). It uses
+// exponential backoff with full jitter, never exceeding maxBackoff. A server
+// Retry-After hint is honored as a lower bound (also capped at maxBackoff).
+func (c *Client) backoffDelay(attempt int, retryAfter time.Duration) time.Duration {
+	base := c.backoff
+	for i := 1; i < attempt; i++ {
+		base *= 2
+		if base >= c.maxBackoff {
+			break
+		}
+	}
+	if base > c.maxBackoff || base <= 0 {
+		base = c.maxBackoff
+	}
+
+	delay := time.Duration(rand.Int64N(int64(base) + 1))
+
+	if retryAfter > c.maxBackoff {
+		retryAfter = c.maxBackoff
+	}
+	if retryAfter > delay {
+		return retryAfter
+	}
+	return delay
+}
+
+// parseRetryAfter interprets a Retry-After header as either delay-seconds or an
+// HTTP date.
+func parseRetryAfter(h string) time.Duration {
+	h = strings.TrimSpace(h)
+	if h == "" {
+		return 0
+	}
+	if secs, err := strconv.Atoi(h); err == nil && secs >= 0 {
+		return time.Duration(secs) * time.Second
+	}
+	if t, err := http.ParseTime(h); err == nil {
+		if d := time.Until(t); d > 0 {
+			return d
+		}
+	}
+	return 0
+}
+
+func sleep(ctx context.Context, d time.Duration) error {
+	if d <= 0 {
+		return nil
+	}
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-t.C:
+		return nil
+	}
 }

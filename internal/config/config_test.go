@@ -10,6 +10,8 @@ var envKeys = []string{
 	"EY_DISK_THRESHOLD", "EY_MEM_THRESHOLD", "EY_CPU_THRESHOLD",
 	"EY_PATH", "EY_WEBHOOK", "EY_FORMAT", "EY_DAEMON", "EY_INTERVAL",
 	"EY_ALERT_MODE", "EY_COOLDOWN", "EY_TIMEOUT", "EY_JSON", "EY_EXIT_CODE",
+	"EY_LOG_FORMAT", "EY_LOG_LEVEL", "EY_QUIET", "EY_RETRIES",
+	"EY_RETRY_BACKOFF", "EY_STATE_FILE", "EY_NO_STATE",
 }
 
 // clearEnv blanks every EY_* variable so tests are independent of the host.
@@ -43,6 +45,15 @@ func TestParseDefaults(t *testing.T) {
 	}
 	if c.JSON || c.ExitCode {
 		t.Error("JSON/ExitCode should default to false")
+	}
+	if c.LogFormat != LogFormatText || c.LogLevel != LogLevelInfo || c.Quiet {
+		t.Errorf("LogFormat/LogLevel/Quiet = %q/%q/%v, want text/info/false", c.LogFormat, c.LogLevel, c.Quiet)
+	}
+	if c.Retries != 3 || c.RetryBackoff != 500*time.Millisecond {
+		t.Errorf("Retries/RetryBackoff = %d/%s, want 3/500ms", c.Retries, c.RetryBackoff)
+	}
+	if c.StateFile != "" || c.NoState {
+		t.Errorf("StateFile/NoState = %q/%v, want empty/false", c.StateFile, c.NoState)
 	}
 }
 
@@ -99,6 +110,10 @@ func TestParseRejectsInvalid(t *testing.T) {
 		{"empty path", []string{"-path", ""}},
 		{"bad webhook scheme", []string{"-webhook", "ftp://example.com/hook"}},
 		{"unparseable webhook", []string{"-webhook", "://bad"}},
+		{"bad log format", []string{"-log-format", "xml"}},
+		{"bad log level", []string{"-log-level", "trace"}},
+		{"negative retries", []string{"-retries", "-1"}},
+		{"zero retry backoff", []string{"-retry-backoff", "0s"}},
 		{"unknown flag", []string{"-nope"}},
 	}
 	for _, tt := range tests {
@@ -184,5 +199,51 @@ func TestInvalidEnvIgnoredWhenFlagSet(t *testing.T) {
 
 	if _, err := Parse([]string{"-interval", "5s"}); err != nil {
 		t.Fatalf("Parse: %v, invalid env must be ignored when flag is set", err)
+	}
+}
+
+func TestEnvRetriesAndLogging(t *testing.T) {
+	clearEnv(t)
+	t.Setenv("EY_RETRIES", "7")
+	t.Setenv("EY_RETRY_BACKOFF", "2s")
+	t.Setenv("EY_LOG_FORMAT", "json")
+	t.Setenv("EY_LOG_LEVEL", "debug")
+	t.Setenv("EY_QUIET", "true")
+	t.Setenv("EY_NO_STATE", "1")
+	t.Setenv("EY_STATE_FILE", "/tmp/ey-state.json")
+
+	c, err := Parse(nil)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if c.Retries != 7 || c.RetryBackoff != 2*time.Second {
+		t.Errorf("Retries/RetryBackoff = %d/%s, want 7/2s", c.Retries, c.RetryBackoff)
+	}
+	if c.LogFormat != LogFormatJSON || c.LogLevel != LogLevelDebug || !c.Quiet {
+		t.Errorf("LogFormat/LogLevel/Quiet = %q/%q/%v", c.LogFormat, c.LogLevel, c.Quiet)
+	}
+	if !c.NoState || c.StateFile != "/tmp/ey-state.json" {
+		t.Errorf("NoState/StateFile = %v/%q", c.NoState, c.StateFile)
+	}
+}
+
+func TestQuietOutput(t *testing.T) {
+	tests := []struct {
+		name string
+		cfg  Config
+		want bool
+	}{
+		{"one-shot default prints", Config{}, false},
+		{"explicit quiet", Config{Quiet: true}, true},
+		{"daemon is quiet", Config{Daemon: true}, true},
+		{"daemon json prints", Config{Daemon: true, JSON: true}, false},
+		{"daemon json but quiet", Config{Daemon: true, JSON: true, Quiet: true}, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.cfg.QuietOutput(); got != tt.want {
+				t.Errorf("QuietOutput() = %v, want %v", got, tt.want)
+			}
+		})
 	}
 }

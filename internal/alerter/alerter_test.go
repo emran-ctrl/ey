@@ -4,9 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -30,6 +32,10 @@ var (
 	}
 )
 
+func discardLogger() *slog.Logger {
+	return slog.New(slog.NewTextHandler(io.Discard, nil))
+}
+
 func TestDetect(t *testing.T) {
 	tests := []struct {
 		url  string
@@ -49,11 +55,11 @@ func TestDetect(t *testing.T) {
 }
 
 func TestNewResolvesAuto(t *testing.T) {
-	c := New("https://hooks.slack.com/x", config.FormatAuto, time.Second)
+	c := New("https://hooks.slack.com/x", Options{Format: config.FormatAuto, Timeout: time.Second})
 	if c.format != config.FormatSlack {
 		t.Errorf("format = %q, want slack", c.format)
 	}
-	c = New("https://example.com/x", config.FormatAuto, time.Second)
+	c = New("https://example.com/x", Options{Format: config.FormatAuto, Timeout: time.Second})
 	if c.format != config.FormatGeneric {
 		t.Errorf("format = %q, want generic", c.format)
 	}
@@ -132,7 +138,7 @@ func TestSendPayloadShapes(t *testing.T) {
 			}))
 			defer srv.Close()
 
-			c := New(srv.URL, tt.format, time.Second)
+			c := New(srv.URL, Options{Format: tt.format, Timeout: time.Second, Retries: 0, Logger: discardLogger()})
 			if err := c.Send(context.Background(), testBreaches, testSnap); err != nil {
 				t.Fatalf("Send: %v", err)
 			}
@@ -150,7 +156,7 @@ func TestSendAccepts204(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := New(srv.URL, config.FormatDiscord, time.Second)
+	c := New(srv.URL, Options{Format: config.FormatDiscord, Timeout: time.Second, Retries: 0, Logger: discardLogger()})
 	if err := c.Send(context.Background(), testBreaches, testSnap); err != nil {
 		t.Fatalf("Send: %v", err)
 	}
@@ -162,7 +168,7 @@ func TestSendNon2xxReturnsBody(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := New(srv.URL, config.FormatSlack, time.Second)
+	c := New(srv.URL, Options{Format: config.FormatSlack, Timeout: time.Second, Logger: discardLogger()})
 	err := c.Send(context.Background(), testBreaches, testSnap)
 	if err == nil {
 		t.Fatal("Send = nil error, want error")
@@ -173,7 +179,7 @@ func TestSendNon2xxReturnsBody(t *testing.T) {
 }
 
 func TestSendNoWebhook(t *testing.T) {
-	c := New("", config.FormatAuto, time.Second)
+	c := New("", Options{Format: config.FormatAuto, Logger: discardLogger()})
 	if err := c.Send(context.Background(), testBreaches, testSnap); err == nil {
 		t.Fatal("Send = nil error, want error for empty URL")
 	}
@@ -185,8 +191,143 @@ func TestSendTimeout(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := New(srv.URL, config.FormatSlack, 20*time.Millisecond)
+	c := New(srv.URL, Options{Format: config.FormatSlack, Timeout: 20 * time.Millisecond, Retries: 0, Logger: discardLogger()})
 	if err := c.Send(context.Background(), testBreaches, testSnap); err == nil {
 		t.Fatal("Send = nil error, want timeout error")
+	}
+}
+
+func TestSendRetriesThenSucceeds(t *testing.T) {
+	var attempts int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if atomic.AddInt32(&attempts, 1) <= 2 {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, Options{
+		Format: config.FormatGeneric, Timeout: time.Second,
+		Retries: 3, Backoff: time.Millisecond, MaxBackoff: 2 * time.Millisecond,
+		Logger: discardLogger(),
+	})
+	if err := c.Send(context.Background(), testBreaches, testSnap); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	if got := atomic.LoadInt32(&attempts); got != 3 {
+		t.Errorf("attempts = %d, want 3", got)
+	}
+}
+
+func TestSendGivesUpAfterRetries(t *testing.T) {
+	var attempts int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&attempts, 1)
+		w.WriteHeader(http.StatusBadGateway)
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, Options{
+		Format: config.FormatGeneric, Timeout: time.Second,
+		Retries: 2, Backoff: time.Millisecond, MaxBackoff: time.Millisecond,
+		Logger: discardLogger(),
+	})
+	err := c.Send(context.Background(), testBreaches, testSnap)
+	if err == nil {
+		t.Fatal("Send = nil error, want error")
+	}
+	if !strings.Contains(err.Error(), "giving up after 3 attempts") {
+		t.Errorf("error %q missing give-up message", err)
+	}
+	if got := atomic.LoadInt32(&attempts); got != 3 {
+		t.Errorf("attempts = %d, want 3", got)
+	}
+}
+
+func TestSendNoRetryOn4xx(t *testing.T) {
+	var attempts int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&attempts, 1)
+		w.WriteHeader(http.StatusBadRequest)
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, Options{
+		Format: config.FormatGeneric, Timeout: time.Second,
+		Retries: 3, Backoff: time.Millisecond, Logger: discardLogger(),
+	})
+	if err := c.Send(context.Background(), testBreaches, testSnap); err == nil {
+		t.Fatal("Send = nil error, want error")
+	}
+	if got := atomic.LoadInt32(&attempts); got != 1 {
+		t.Errorf("attempts = %d, want 1 (4xx must not be retried)", got)
+	}
+}
+
+func TestSendContextCanceledDuringBackoff(t *testing.T) {
+	var attempts int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&attempts, 1)
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, Options{
+		Format: config.FormatGeneric, Timeout: time.Second,
+		Retries: 3, Backoff: 5 * time.Second, MaxBackoff: 5 * time.Second,
+		Logger: discardLogger(),
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+
+	start := time.Now()
+	err := c.Send(ctx, testBreaches, testSnap)
+	if err == nil {
+		t.Fatal("Send = nil error, want context error")
+	}
+	if !strings.Contains(err.Error(), "context") && !strings.Contains(err.Error(), "retry aborted") {
+		t.Errorf("error %q should reflect cancellation", err)
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Errorf("Send took %s; backoff wait was not aborted by cancel", elapsed)
+	}
+	if got := atomic.LoadInt32(&attempts); got != 1 {
+		t.Errorf("attempts = %d, want 1", got)
+	}
+}
+
+func TestParseRetryAfter(t *testing.T) {
+	tests := []struct {
+		in   string
+		want time.Duration
+	}{
+		{"", 0},
+		{"0", 0},
+		{"5", 5 * time.Second},
+		{"-1", 0},
+		{"garbage", 0},
+	}
+	for _, tt := range tests {
+		if got := parseRetryAfter(tt.in); got != tt.want {
+			t.Errorf("parseRetryAfter(%q) = %s, want %s", tt.in, got, tt.want)
+		}
+	}
+}
+
+func TestBackoffDelayCapsAndHonorsRetryAfter(t *testing.T) {
+	c := New("https://example.com", Options{
+		Backoff: 100 * time.Millisecond, MaxBackoff: 500 * time.Millisecond, Logger: discardLogger(),
+	})
+	if d := c.backoffDelay(1, 0); d < 0 || d > 100*time.Millisecond {
+		t.Errorf("delay = %s, want within [0,100ms]", d)
+	}
+	if d := c.backoffDelay(10, 0); d < 0 || d > 500*time.Millisecond {
+		t.Errorf("delay = %s, want capped at 500ms", d)
+	}
+	if d := c.backoffDelay(1, 5*time.Second); d != 500*time.Millisecond {
+		t.Errorf("delay = %s, want capped to maxBackoff 500ms", d)
 	}
 }
