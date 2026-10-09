@@ -1,0 +1,49 @@
+name: Bug report
+description: Report a problem with ey
+title: "bug: "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to file a bug report. Please redact any
+        secrets (webhook URLs, tokens) from logs before pasting them.
+  - type: input
+    id: version
+    attributes:
+      label: ey version
+      description: Output of `ey -version`.
+      placeholder: ey v0.1.0
+    validations:
+      required: true
+  - type: input
+    id: platform
+    attributes:
+      label: OS / platform
+      placeholder: Ubuntu 24.04, linux/amd64
+    validations:
+      required: true
+  - type: textarea
+    id: command
+    attributes:
+      label: Command run
+      description: The exact command line, with secrets removed.
+      render: shell
+      placeholder: ey -daemon -interval 30s -webhook https://...
+    validations:
+      required: true
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: Include the actual output and what you expected instead.
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: Re-run with `-log-level debug` if relevant.
+      render: shell
+    validations:
+      required: false

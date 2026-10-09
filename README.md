@@ -2,6 +2,7 @@
 
 [![CI](https://github.com/emran-ctrl/ey/actions/workflows/ci.yml/badge.svg)](https://github.com/emran-ctrl/ey/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/emran-ctrl/ey)](https://github.com/emran-ctrl/ey/releases)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 A small, dependency-free CLI system monitor written in Go. `ey` samples disk,
 memory, and CPU usage, compares them against configurable thresholds, and fires
@@ -382,3 +383,7 @@ deploy/            systemd units and example EnvironmentFile
 - **Runtime:** none — the binary is static (Linux/macOS, amd64/arm64)
 - **Optional:** Docker (container image), systemd (service units),
   GoReleaser (release artifacts)
+
+## License
+
+Released under the [MIT License](LICENSE).
