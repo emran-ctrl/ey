@@ -1,0 +1,34 @@
+[Unit]
+Description=ey system monitor (daemon)
+Documentation=https://example.invalid/ey
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Webhook, thresholds, and log settings live here so secrets never appear in
+# the unit file.
+EnvironmentFile=-/etc/ey/ey.env
+# Writable directory for the persisted alert state (cooldown/once survive
+# restarts); exposed to the process as $XDG_STATE_HOME.
+StateDirectory=ey
+Environment=XDG_STATE_HOME=/var/lib/ey
+ExecStart=/usr/local/bin/ey -daemon
+Restart=on-failure
+RestartSec=5s
+
+# Hardening: ey only reads /proc, /sys, and the target filesystem.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=true
+MemoryDenyWriteExecute=true
+CapabilityBoundingSet=
+LockPersonality=true
+
+[Install]
+WantedBy=multi-user.target

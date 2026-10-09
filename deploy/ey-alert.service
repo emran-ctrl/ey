@@ -1,0 +1,27 @@
+[Unit]
+Description=ey one-shot system health check
+Documentation=https://example.invalid/ey
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=-/etc/ey/ey.env
+# Writable directory so cooldown/once state persists between timer runs.
+StateDirectory=ey
+Environment=XDG_STATE_HOME=/var/lib/ey
+# -exit-code makes a threshold breach a failed unit, visible to `systemctl
+# --failed` and usable with OnFailure= handlers.
+ExecStart=/usr/local/bin/ey -exit-code
+
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=true
+MemoryDenyWriteExecute=true
+CapabilityBoundingSet=
+LockPersonality=true
