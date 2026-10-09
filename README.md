@@ -4,10 +4,10 @@
 [![Release](https://img.shields.io/github/v/release/emran-ctrl/ey)](https://github.com/emran-ctrl/ey/releases)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-A small, dependency-free CLI system monitor written in Go. `ey` samples disk,
-memory, and CPU usage, compares them against configurable thresholds, and fires
-a webhook alert (Slack, Discord, or a generic JSON endpoint) when a limit is
-exceeded. It runs either as a one-shot check or as a long-lived daemon.
+A small CLI system monitor written in Go. `ey` samples disk, memory, and CPU
+usage, compares them against configurable thresholds, and fires a webhook alert
+(Slack, Discord, or a generic JSON endpoint) when a limit is exceeded. It runs
+either as a one-shot check or as a long-lived daemon.
 
 - Single static binary — no runtime dependencies
 - One-shot or daemon mode
@@ -17,6 +17,8 @@ exceeded. It runs either as a one-shot check or as a long-lived daemon.
   with exponential backoff, full jitter, and `Retry-After` support
 - Structured logging (`text` or `json`) to stderr, machine-readable metrics to
   stdout (`-json`)
+- Interactive configuration wizard (`ey config`) plus a YAML config file
+- Pick which metrics to collect (`-metrics`), colorize output (`-color`)
 - Docker image and hardened systemd units included
 
 ## Contents
@@ -26,6 +28,8 @@ exceeded. It runs either as a one-shot check or as a long-lived daemon.
 - [Usage](#usage)
 - [Configuration](#configuration)
   - [Flags and environment variables](#flags-and-environment-variables)
+  - [Config file](#config-file)
+  - [Interactive configuration](#interactive-configuration)
   - [Alert formats](#alert-formats)
   - [Alert modes](#alert-modes)
   - [State persistence](#state-persistence)
@@ -112,15 +116,25 @@ ey -path /data -disk-threshold 90
 
 # Daemon with JSON logs and a generic webhook.
 ey -daemon -log-format json -format generic -webhook https://example.com/hook
+
+# Configure ey interactively (writes ~/.config/ey/config.yaml).
+ey config
+
+# Only watch CPU, no color when piped.
+ey -metrics cpu -color never
 ```
 
-Run `ey -h` to print the built-in flag help.
+Run `ey -h` to print the built-in flag help and `ey config -h` for the
+config subcommand's flags.
 
 ## Configuration
 
-Precedence is **flag > environment variable > built-in default**. Every flag has
-an `EY_*` environment variable equivalent (except `-version`), which is useful
-for containers and systemd `EnvironmentFile`s.
+Precedence is **flag > environment variable > config file > built-in default**.
+Every flag has an `EY_*` environment variable equivalent (except `-version`),
+which is useful for containers and systemd `EnvironmentFile`s. A config file is
+loaded from `-config`, else `$EY_CONFIG`, else the per-user default
+`~/.config/ey/config.yaml` (via `XDG_CONFIG_HOME`). A missing config file is
+simply ignored; a malformed one is a hard error.
 
 ### Flags and environment variables
 
@@ -130,6 +144,7 @@ for containers and systemd `EnvironmentFile`s.
 | `-mem-threshold` | `EY_MEM_THRESHOLD` | `90` | Memory usage percent that triggers an alert (0–100). |
 | `-cpu-threshold` | `EY_CPU_THRESHOLD` | `90` | CPU usage percent that triggers an alert (0–100). |
 | `-path` | `EY_PATH` | `/` | Filesystem path whose usage is checked. |
+| `-metrics` | `EY_METRICS` | `disk,memory,cpu` | Comma-separated metrics to monitor. |
 | `-webhook` | `EY_WEBHOOK` | *(none)* | Slack, Discord, or generic webhook URL. |
 | `-format` | `EY_FORMAT` | `auto` | Payload format: `auto`, `slack`, `discord`, or `generic`. |
 | `-daemon` | `EY_DAEMON` | `false` | Run continuously instead of a single check. |
@@ -138,6 +153,7 @@ for containers and systemd `EnvironmentFile`s.
 | `-cooldown` | `EY_COOLDOWN` | `10m` | Minimum time between alerts in `cooldown` mode. |
 | `-timeout` | `EY_TIMEOUT` | `5s` | HTTP client timeout for webhook delivery. |
 | `-json` | `EY_JSON` | `false` | Emit metrics as JSON to stdout. |
+| `-color` | `EY_COLOR` | `auto` | Colorize text output: `auto`, `always`, or `never`. |
 | `-exit-code` | `EY_EXIT_CODE` | `false` | Exit `1` when any threshold is breached. |
 | `-log-format` | `EY_LOG_FORMAT` | `text` | Log output format: `text` or `json`. |
 | `-log-level` | `EY_LOG_LEVEL` | `info` | Log level: `debug`, `info`, `warn`, or `error`. |
@@ -146,10 +162,73 @@ for containers and systemd `EnvironmentFile`s.
 | `-retry-backoff` | `EY_RETRY_BACKOFF` | `500ms` | Base delay for retry backoff. |
 | `-state-file` | `EY_STATE_FILE` | *(per-user state dir)* | Override the alert state file path. |
 | `-no-state` | `EY_NO_STATE` | `false` | Disable persisting alert state to disk. |
+| `-config` | `EY_CONFIG` | *(per-user config dir)* | Path to the YAML config file. |
 | `-version` | — | | Print version and exit. |
 
 An invalid `EY_*` value is reported only when the matching flag is not set
 explicitly, since an explicit flag takes precedence over the environment.
+
+### Config file
+
+Settings live in `~/.config/ey/config.yaml`, either comma-separated scalars or
+YAML lists for `metrics`:
+
+```yaml
+disk_threshold: 80
+mem_threshold: 90
+cpu_threshold: 90
+path: /
+metrics:           # or "metrics: disk,memory,cpu"
+  - disk
+  - memory
+  - cpu
+webhook: https://hooks.slack.com/services/xxx
+format: auto
+daemon: true
+interval: 60s
+alert_mode: always
+cooldown: 10m
+timeout: 5s
+json: false
+color: auto
+log_format: text
+log_level: info
+quiet: false
+retries: 3
+retry_backoff: 500ms
+state_file: ""
+no_state: false
+```
+
+The file is merged field-by-field, so a partial file such as
+`disk_threshold: 95` is valid and leaves everything else at its default.
+Unknown keys are ignored. Flags and `EY_*` variables always win over the file.
+
+### Interactive configuration
+
+`ey config` runs an interactive wizard that walks through every setting,
+validates each answer, and writes the result atomically with `0600`
+permissions. Values are seeded from your existing config file, and pressing
+`Enter` keeps the current value.
+
+```console
+# Run the wizard.
+ey config
+
+# Print the resolved config path.
+ey config -path
+# -> /home/you/.config/ey/config.yaml
+
+# Print the effective configuration (defaults merged with the file) as YAML.
+ey config -print
+
+# Point at a specific file.
+ey config -config /etc/ey/config.yaml
+```
+
+The wizard only runs on an interactive terminal; when stdin is not a TTY it
+refuses and suggests `ey config -print` instead, so scripts and service
+managers can never get stuck on a prompt.
 
 ### Alert formats
 
@@ -282,16 +361,17 @@ Edit `/etc/ey/ey.env` to set your webhook and thresholds before starting.
 Human-readable output goes to **stdout**; structured logs go to **stderr**.
 `-json` prints a single pretty-printed object in one-shot mode, or compact
 NDJSON (one object per line) in daemon mode. In daemon mode the metrics block is
-suppressed unless `-json` is set, so normal operation relies on logs.
+suppressed unless `-json` is set, so normal operation relies on logs. Only
+metrics selected with `-metrics` (default all three) are printed, logged, and
+evaluated for alerts; text output is ANSI-colorized when connected to a TTY
+(`-color auto`), and can be forced with `-color always` or disabled with
+`-color never`.
 
-One-shot JSON:
+One-shot JSON (with `-metrics cpu,memory`):
 
 ```json
 {
   "timestamp": "2026-10-09T15:02:15.046869595+03:00",
-  "disk_used_percent": 43.18948872347831,
-  "disk_total_bytes": 509943480320,
-  "disk_used_bytes": 216846901248,
   "mem_used_percent": 68.56667063932744,
   "mem_total_bytes": 16428015616,
   "mem_used_bytes": 11264143360,
@@ -369,11 +449,15 @@ git push origin v0.1.0
 ## Project layout
 
 ```text
-cmd/ey/            CLI entry point, flag wiring, daemon loop, alert policy
-internal/config/   Flag + EY_* environment parsing and validation
-internal/monitor/  Metric collection (gopsutil) and threshold evaluation
+cmd/ey/            CLI entry point, flag wiring, daemon loop, alert policy,
+                   config subcommand and text/JSON/color output
+internal/config/   Flag + EY_* environment parsing, YAML config file load/
+                   write, validation
+internal/monitor/  Metric collection (gopsutil), selection, threshold eval
 internal/alerter/  Webhook payload formatting and retrying HTTP delivery
+internal/wizard/   Interactive config wizard (ey config)
 internal/state/    Atomic JSON state persistence
+internal/fsutil/   Shared atomic file writes
 deploy/            systemd units and example EnvironmentFile
 ```
 

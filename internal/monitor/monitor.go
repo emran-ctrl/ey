@@ -2,6 +2,7 @@ package monitor
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/shirou/gopsutil/v4/cpu"
@@ -28,34 +29,91 @@ type Breach struct {
 	Threshold float64 `json:"threshold"`
 }
 
-// Collect samples disk, memory, and CPU usage for the given path.
+// Selection reports which metrics are enabled. A disabled metric is not
+// collected, displayed, or evaluated for alerts.
+type Selection struct {
+	Disk bool
+	Mem  bool
+	CPU  bool
+}
+
+// AllSelection enables every metric.
+func AllSelection() Selection { return Selection{Disk: true, Mem: true, CPU: true} }
+
+// Any reports whether at least one metric is selected.
+func (s Selection) Any() bool { return s.Disk || s.Mem || s.CPU }
+
+// Has reports whether the named metric is selected.
+func (s Selection) Has(metric string) bool {
+	switch metric {
+	case "disk":
+		return s.Disk
+	case "memory":
+		return s.Mem
+	case "cpu":
+		return s.CPU
+	}
+	return false
+}
+
+// ParseSelection parses a comma- or whitespace-separated metric list such as
+// "disk,memory" into a Selection.
+func ParseSelection(list string) (Selection, error) {
+	var s Selection
+	for _, raw := range strings.FieldsFunc(list, func(r rune) bool {
+		return r == ',' || r == ' ' || r == '\t' || r == '\n' || r == '\r'
+	}) {
+		switch strings.ToLower(strings.TrimSpace(raw)) {
+		case "disk":
+			s.Disk = true
+		case "memory":
+			s.Mem = true
+		case "cpu":
+			s.CPU = true
+		default:
+			return s, fmt.Errorf("unknown metric %q", raw)
+		}
+	}
+	if !s.Any() {
+		return s, fmt.Errorf("no metrics selected")
+	}
+	return s, nil
+}
+
+// Collect samples the selected disk, memory, and CPU usage.
 // cpuInterval is how long to sample CPU utilization; pass 0 in daemon mode
 // to measure usage since the previous call.
-func Collect(path string, cpuInterval time.Duration) (Snapshot, error) {
+func Collect(path string, cpuInterval time.Duration, sel Selection) (Snapshot, error) {
 	s := Snapshot{Timestamp: time.Now()}
 
-	diskUsage, err := disk.Usage(path)
-	if err != nil {
-		return s, fmt.Errorf("disk usage for %s: %w", path, err)
+	if sel.Disk {
+		diskUsage, err := disk.Usage(path)
+		if err != nil {
+			return s, fmt.Errorf("disk usage for %s: %w", path, err)
+		}
+		s.DiskUsedPercent = diskUsage.UsedPercent
+		s.DiskTotalBytes = diskUsage.Total
+		s.DiskUsedBytes = diskUsage.Used
 	}
-	s.DiskUsedPercent = diskUsage.UsedPercent
-	s.DiskTotalBytes = diskUsage.Total
-	s.DiskUsedBytes = diskUsage.Used
 
-	vm, err := mem.VirtualMemory()
-	if err != nil {
-		return s, fmt.Errorf("virtual memory: %w", err)
+	if sel.Mem {
+		vm, err := mem.VirtualMemory()
+		if err != nil {
+			return s, fmt.Errorf("virtual memory: %w", err)
+		}
+		s.MemUsedPercent = vm.UsedPercent
+		s.MemTotalBytes = vm.Total
+		s.MemUsedBytes = vm.Used
 	}
-	s.MemUsedPercent = vm.UsedPercent
-	s.MemTotalBytes = vm.Total
-	s.MemUsedBytes = vm.Used
 
-	percent, err := cpu.Percent(cpuInterval, false)
-	if err != nil {
-		return s, fmt.Errorf("cpu percent: %w", err)
-	}
-	if len(percent) > 0 {
-		s.CPUUsedPercent = percent[0]
+	if sel.CPU {
+		percent, err := cpu.Percent(cpuInterval, false)
+		if err != nil {
+			return s, fmt.Errorf("cpu percent: %w", err)
+		}
+		if len(percent) > 0 {
+			s.CPUUsedPercent = percent[0]
+		}
 	}
 
 	return s, nil
@@ -75,16 +133,17 @@ func PrimeCPU() {
 	_, _ = cpu.Percent(0, false)
 }
 
-// Evaluate returns one Breach per metric whose value exceeds its threshold.
-func Evaluate(s Snapshot, t Thresholds) []Breach {
+// Evaluate returns one Breach per selected metric whose value exceeds its
+// threshold.
+func Evaluate(s Snapshot, t Thresholds, sel Selection) []Breach {
 	var breaches []Breach
-	if s.DiskUsedPercent > t.Disk {
+	if sel.Disk && s.DiskUsedPercent > t.Disk {
 		breaches = append(breaches, Breach{Metric: "disk", Value: s.DiskUsedPercent, Threshold: t.Disk})
 	}
-	if s.MemUsedPercent > t.Mem {
+	if sel.Mem && s.MemUsedPercent > t.Mem {
 		breaches = append(breaches, Breach{Metric: "memory", Value: s.MemUsedPercent, Threshold: t.Mem})
 	}
-	if s.CPUUsedPercent > t.CPU {
+	if sel.CPU && s.CPUUsedPercent > t.CPU {
 		breaches = append(breaches, Breach{Metric: "cpu", Value: s.CPUUsedPercent, Threshold: t.CPU})
 	}
 	return breaches

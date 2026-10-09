@@ -2,7 +2,10 @@ module ey
 
 go 1.27.0
 
-require github.com/shirou/gopsutil/v4 v4.26.9
+require (
+	github.com/shirou/gopsutil/v4 v4.26.9
+	go.yaml.in/yaml/v3 v3.0.5
+)
 
 require (
 	github.com/ebitengine/purego v0.11.1 // indirect

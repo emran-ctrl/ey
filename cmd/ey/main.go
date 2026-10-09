@@ -6,6 +6,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -16,6 +17,7 @@ import (
 	"ey/internal/config"
 	"ey/internal/monitor"
 	"ey/internal/state"
+	"ey/internal/wizard"
 )
 
 func main() {
@@ -23,6 +25,10 @@ func main() {
 }
 
 func run(args []string) int {
+	if len(args) > 0 && args[0] == "config" {
+		return runConfig(args[1:])
+	}
+
 	cfg, err := config.Parse(args)
 	if err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -38,6 +44,12 @@ func run(args []string) int {
 	}
 
 	logger := newLogger(cfg)
+
+	sel, err := monitor.ParseSelection(cfg.Metrics)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "ey: %v\n", err)
+		return 2
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -64,23 +76,23 @@ func run(args []string) int {
 	}
 
 	if !cfg.Daemon {
-		code := policy.step(ctx, client, thresholds, cfg, cpuSampleWindow, true)
+		code := policy.step(ctx, client, thresholds, cfg, sel, cpuSampleWindow, true)
 		policy.flush()
 		return code
 	}
 
-	return runDaemon(ctx, policy, client, thresholds, cfg)
+	return runDaemon(ctx, policy, client, thresholds, cfg, sel)
 }
 
 // runDaemon drives repeated checks, rescheduling the next run only after the
 // current one finishes so a slow check cannot pile up ticks.
-func runDaemon(ctx context.Context, policy *alertPolicy, client *alerter.Client, th monitor.Thresholds, cfg *config.Config) int {
+func runDaemon(ctx context.Context, policy *alertPolicy, client *alerter.Client, th monitor.Thresholds, cfg *config.Config, sel monitor.Selection) int {
 	code := 0
 
 	// First cycle uses a blocking CPU sample for an accurate reading, then
 	// baseline the delta-based sampler used by subsequent ticks.
 	start := time.Now()
-	code = policy.step(ctx, client, th, cfg, cpuSampleWindow, false)
+	code = policy.step(ctx, client, th, cfg, sel, cpuSampleWindow, false)
 	logCycle(policy.logger, start)
 	monitor.PrimeCPU()
 
@@ -94,7 +106,7 @@ func runDaemon(ctx context.Context, policy *alertPolicy, client *alerter.Client,
 		}
 
 		start = time.Now()
-		if c := policy.step(ctx, client, th, cfg, 0, false); c != 0 {
+		if c := policy.step(ctx, client, th, cfg, sel, 0, false); c != 0 {
 			code = c
 		}
 		logCycle(policy.logger, start)
@@ -224,19 +236,20 @@ func (p *alertPolicy) flush() {
 	}
 }
 
-// step performs one collect/evaluate/alert cycle. cpuWindow is how long
-// cpu.Percent samples (0 = delta since the previous call). onExit controls
-// whether breach state contributes to the process exit code (-exit-code).
-func (p *alertPolicy) step(ctx context.Context, client *alerter.Client, th monitor.Thresholds, cfg *config.Config, cpuWindow time.Duration, onExit bool) int {
-	snap, err := monitor.Collect(cfg.Path, cpuWindow)
+// step performs one collect/evaluate/alert cycle. sel selects which metrics to
+// monitor. cpuWindow is how long cpu.Percent samples (0 = delta since the
+// previous call). onExit controls whether breach state contributes to the
+// process exit code (-exit-code).
+func (p *alertPolicy) step(ctx context.Context, client *alerter.Client, th monitor.Thresholds, cfg *config.Config, sel monitor.Selection, cpuWindow time.Duration, onExit bool) int {
+	snap, err := monitor.Collect(cfg.Path, cpuWindow, sel)
 	if err != nil {
 		p.logger.Error("collect metrics", "err", err)
 		return 2
 	}
 
-	breaches := monitor.Evaluate(snap, th)
-	output(cfg, snap, breaches)
-	p.logMeasurements(snap, breaches)
+	breaches := monitor.Evaluate(snap, th, sel)
+	output(cfg, snap, breaches, sel)
+	p.logMeasurements(snap, breaches, sel)
 
 	if p.shouldSend(breaches, snap.Timestamp) {
 		if cfg.Webhook == "" {
@@ -256,13 +269,18 @@ func (p *alertPolicy) step(ctx context.Context, client *alerter.Client, th monit
 
 // logMeasurements emits a one-line per-cycle summary and a structured per-breach
 // record, keeping stdout reserved for the -json/-text metrics output.
-func (p *alertPolicy) logMeasurements(s monitor.Snapshot, breaches []monitor.Breach) {
-	p.logger.Info("check complete",
-		"disk_percent", round2(s.DiskUsedPercent),
-		"mem_percent", round2(s.MemUsedPercent),
-		"cpu_percent", round2(s.CPUUsedPercent),
-		"breaches", len(breaches),
-	)
+func (p *alertPolicy) logMeasurements(s monitor.Snapshot, breaches []monitor.Breach, sel monitor.Selection) {
+	attrs := []any{"breaches", len(breaches)}
+	if sel.Disk {
+		attrs = append(attrs, "disk_percent", round2(s.DiskUsedPercent))
+	}
+	if sel.Mem {
+		attrs = append(attrs, "mem_percent", round2(s.MemUsedPercent))
+	}
+	if sel.CPU {
+		attrs = append(attrs, "cpu_percent", round2(s.CPUUsedPercent))
+	}
+	p.logger.Info("check complete", attrs...)
 	for _, b := range breaches {
 		p.logger.Warn("threshold breached",
 			"metric", b.Metric, "value", round2(b.Value), "threshold", b.Threshold)
@@ -277,7 +295,7 @@ func round2(v float64) float64 {
 // cold start; later daemon cycles use the delta since the previous tick.
 const cpuSampleWindow = time.Second
 
-func output(cfg *config.Config, s monitor.Snapshot, breaches []monitor.Breach) {
+func output(cfg *config.Config, s monitor.Snapshot, breaches []monitor.Breach, sel monitor.Selection) {
 	// In daemon mode metrics are logged; stdout is only used for -json so that
 	// normal daemon operation stays quiet unless explicitly requested.
 	if cfg.QuietOutput() {
@@ -289,28 +307,188 @@ func output(cfg *config.Config, s monitor.Snapshot, breaches []monitor.Breach) {
 		if !cfg.Daemon {
 			enc.SetIndent("", "  ")
 		}
-		if err := enc.Encode(struct {
-			monitor.Snapshot
-			Breaches []monitor.Breach `json:"breaches,omitempty"`
-		}{Snapshot: s, Breaches: breaches}); err != nil {
+		out := map[string]any{
+			"timestamp": s.Timestamp,
+		}
+		if len(breaches) > 0 {
+			out["breaches"] = breaches
+		}
+		if sel.Disk {
+			out["disk_used_percent"] = s.DiskUsedPercent
+			out["disk_total_bytes"] = s.DiskTotalBytes
+			out["disk_used_bytes"] = s.DiskUsedBytes
+		}
+		if sel.Mem {
+			out["mem_used_percent"] = s.MemUsedPercent
+			out["mem_total_bytes"] = s.MemTotalBytes
+			out["mem_used_bytes"] = s.MemUsedBytes
+		}
+		if sel.CPU {
+			out["cpu_used_percent"] = s.CPUUsedPercent
+		}
+		if err := enc.Encode(out); err != nil {
 			fmt.Fprintf(os.Stderr, "ey: encode output: %v\n", err)
 		}
 		return
 	}
 
-	fmt.Printf("System Status Check - %s\n", s.Timestamp.Format(time.RFC822))
-	fmt.Printf("Disk Usage: %.2f%% (%.1f/%.1f GiB) @ %s\n",
-		s.DiskUsedPercent, monitor.GiB(s.DiskUsedBytes), monitor.GiB(s.DiskTotalBytes), cfg.Path)
-	fmt.Printf("RAM Usage:  %.2f%% (%.1f/%.1f GiB)\n",
-		s.MemUsedPercent, monitor.GiB(s.MemUsedBytes), monitor.GiB(s.MemTotalBytes))
-	fmt.Printf("CPU Usage:  %.2f%%\n", s.CPUUsedPercent)
+	color := useColor(cfg)
+	breached := map[string]bool{}
+	for _, b := range breaches {
+		breached[b.Metric] = true
+	}
+
+	fmt.Printf("%s\n", paint(color, true, "System Status Check - "+s.Timestamp.Format(time.RFC822)))
+	if sel.Disk {
+		paintValue(color, "Disk Usage", fmt.Sprintf("%.2f%% (%.1f/%.1f GiB) @ %s",
+			s.DiskUsedPercent, monitor.GiB(s.DiskUsedBytes), monitor.GiB(s.DiskTotalBytes), cfg.Path), breached["disk"])
+	}
+	if sel.Mem {
+		paintValue(color, "RAM Usage", fmt.Sprintf("%.2f%% (%.1f/%.1f GiB)",
+			s.MemUsedPercent, monitor.GiB(s.MemUsedBytes), monitor.GiB(s.MemTotalBytes)), breached["memory"])
+	}
+	if sel.CPU {
+		paintValue(color, "CPU Usage", fmt.Sprintf("%.2f%%", s.CPUUsedPercent), breached["cpu"])
+	}
 
 	if len(breaches) == 0 {
-		fmt.Println("Status: OK (all thresholds satisfied)")
+		fmt.Println(paint(color, true, "Status: OK (all thresholds satisfied)"))
 		return
 	}
-	fmt.Println("Threshold breaches:")
+	fmt.Println(paint(color, false, "Threshold breaches:"))
 	for _, b := range breaches {
 		fmt.Printf("  - %s: %.2f%% > %.2f%%\n", b.Metric, b.Value, b.Threshold)
 	}
+}
+
+// useColor decides whether to emit ANSI color, honoring -color.
+func useColor(cfg *config.Config) bool {
+	switch cfg.Color {
+	case config.ColorAlways:
+		return true
+	case config.ColorNever:
+		return false
+	default:
+		return isTerminal(os.Stdout)
+	}
+}
+
+func paintValue(color bool, label, value string, breached bool) {
+	if !color {
+		fmt.Printf("%s: %s\n", label, value)
+		return
+	}
+	if breached {
+		fmt.Printf("%s: %s%s%s\n", label, ansiRed, value, ansiReset)
+		return
+	}
+	fmt.Printf("%s: %s%s%s\n", label, ansiGreen, value, ansiReset)
+}
+
+func paint(color, ok bool, s string) string {
+	if !color {
+		return s
+	}
+	if ok {
+		return ansiGreen + s + ansiReset
+	}
+	return ansiRed + s + ansiReset
+}
+
+const (
+	ansiReset = "\x1b[0m"
+	ansiRed   = "\x1b[31m"
+	ansiGreen = "\x1b[32m"
+)
+
+// isTerminal reports whether f is attached to a character device (TTY).
+func isTerminal(f *os.File) bool {
+	fi, err := f.Stat()
+	if err != nil {
+		return false
+	}
+	return fi.Mode()&os.ModeCharDevice != 0
+}
+
+// runConfig implements the "ey config" subcommand: it prints the resolved
+// config path (-path), prints the effective configuration (-print), or runs
+// the interactive wizard to write one.
+func runConfig(args []string) int {
+	pfs := flag.NewFlagSet("ey config", flag.ContinueOnError)
+	var showPath, printCfg bool
+	var configPath string
+	pfs.Usage = func() {
+		fmt.Fprint(pfs.Output(), "Usage: ey config [flags]\n\nManage ey's configuration file.\n\nFlags:\n")
+		pfs.PrintDefaults()
+	}
+	pfs.BoolVar(&showPath, "path", false, "Print the resolved config file path and exit")
+	pfs.BoolVar(&printCfg, "print", false, "Print the effective configuration and exit")
+	pfs.StringVar(&configPath, "config", "", "Config file to inspect or manage (default: $EY_CONFIG or the per-user location)")
+	if err := pfs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
+		return 2
+	}
+	if pfs.NArg() > 0 {
+		fmt.Fprintf(os.Stderr, "ey config: unexpected argument %q\n", pfs.Arg(0))
+		return 2
+	}
+	if configPath == "" {
+		configPath = os.Getenv("EY_CONFIG")
+	}
+	if configPath == "" {
+		p, err := config.DefaultConfigPath()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "ey config: %v\n", err)
+			return 1
+		}
+		configPath = p
+	}
+
+	if showPath {
+		fmt.Println(configPath)
+		return 0
+	}
+
+	base, err := config.Load(configPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "ey config: %v\n", err)
+		return 1
+	}
+
+	if printCfg {
+		data, err := config.Marshal(base)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "ey config: %v\n", err)
+			return 1
+		}
+		os.Stdout.Write(data)
+		return 0
+	}
+
+	if !isTerminal(os.Stdin) {
+		fmt.Fprintln(os.Stderr, "ey config: interactive mode requires a terminal; use 'ey config -print' to preview or set -config/EY_CONFIG to point at a file")
+		return 2
+	}
+
+	result, err := wizard.Run(os.Stdin, os.Stdout, base)
+	if errors.Is(err, wizard.ErrAborted) {
+		fmt.Fprintln(os.Stdout, "Not saving changes.")
+		return 0
+	}
+	if err != nil {
+		if errors.Is(err, io.EOF) {
+			fmt.Fprintln(os.Stderr, "ey config: input ended before all prompts were answered; nothing written")
+		} else {
+			fmt.Fprintf(os.Stderr, "ey config: %v\n", err)
+		}
+		return 2
+	}
+	if err := config.WriteFile(configPath, config.FromConfig(result)); err != nil {
+		fmt.Fprintf(os.Stderr, "ey config: %v\n", err)
+		return 1
+	}
+	fmt.Fprintf(os.Stdout, "Configuration written to %s\n", configPath)
+	return 0
 }
