@@ -20,7 +20,7 @@ func TestEvaluate(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			breaches := Evaluate(tt.snap, th)
+			breaches := Evaluate(tt.snap, th, AllSelection())
 			if len(breaches) != len(tt.want) {
 				t.Fatalf("got %d breaches (%v), want %d", len(breaches), breaches, len(tt.want))
 			}
@@ -36,10 +36,52 @@ func TestEvaluate(t *testing.T) {
 	}
 }
 
+func TestEvaluateRespectsSelection(t *testing.T) {
+	th := Thresholds{Disk: 80, Mem: 90, CPU: 90}
+	snap := Snapshot{DiskUsedPercent: 99, MemUsedPercent: 99, CPUUsedPercent: 99}
+
+	breaches := Evaluate(snap, th, Selection{Mem: true})
+	if len(breaches) != 1 || breaches[0].Metric != "memory" {
+		t.Fatalf("mem-only selection got %v, want [memory]", breaches)
+	}
+
+	if got := Evaluate(snap, th, Selection{}); len(got) != 0 {
+		t.Fatalf("empty selection got %v, want no breaches", got)
+	}
+}
+
+func TestParseSelection(t *testing.T) {
+	for _, tt := range []struct {
+		in   string
+		want Selection
+	}{
+		{"disk,memory,cpu", AllSelection()},
+		{"cpu,disk", Selection{Disk: true, CPU: true}},
+		{"memory memory", Selection{Mem: true}},
+		{" DISK ,cpu ", Selection{Disk: true, CPU: true}},
+	} {
+		got, err := ParseSelection(tt.in)
+		if err != nil {
+			t.Errorf("ParseSelection(%q): %v", tt.in, err)
+			continue
+		}
+		if got != tt.want {
+			t.Errorf("ParseSelection(%q) = %+v, want %+v", tt.in, got, tt.want)
+		}
+	}
+
+	for _, in := range []string{"", "network", "disk,wat"} {
+		if _, err := ParseSelection(in); err == nil {
+			t.Errorf("ParseSelection(%q) = nil error, want error", in)
+		}
+	}
+}
+
 func TestEvaluateCarriesValues(t *testing.T) {
 	breaches := Evaluate(
 		Snapshot{DiskUsedPercent: 95.5, MemUsedPercent: 99, CPUUsedPercent: 99},
 		Thresholds{Disk: 80, Mem: 100, CPU: 100},
+		AllSelection(),
 	)
 	if len(breaches) != 1 {
 		t.Fatalf("got %d breaches, want 1", len(breaches))
@@ -61,7 +103,7 @@ func TestGiB(t *testing.T) {
 
 // TestCollect is a smoke test that runs against the host system.
 func TestCollect(t *testing.T) {
-	s, err := Collect("/", 100*time.Millisecond)
+	s, err := Collect("/", 100*time.Millisecond, AllSelection())
 	if err != nil {
 		t.Fatalf("Collect: %v", err)
 	}

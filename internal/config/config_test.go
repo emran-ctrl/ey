@@ -12,14 +12,17 @@ var envKeys = []string{
 	"EY_ALERT_MODE", "EY_COOLDOWN", "EY_TIMEOUT", "EY_JSON", "EY_EXIT_CODE",
 	"EY_LOG_FORMAT", "EY_LOG_LEVEL", "EY_QUIET", "EY_RETRIES",
 	"EY_RETRY_BACKOFF", "EY_STATE_FILE", "EY_NO_STATE",
+	"EY_METRICS", "EY_COLOR", "EY_CONFIG",
 }
 
-// clearEnv blanks every EY_* variable so tests are independent of the host.
+// clearEnv blanks every EY_* variable and points the config directory at an
+// empty temp dir so tests are independent of the host.
 func clearEnv(t *testing.T) {
 	t.Helper()
 	for _, k := range envKeys {
 		t.Setenv(k, "")
 	}
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 }
 
 func TestParseDefaults(t *testing.T) {
@@ -54,6 +57,12 @@ func TestParseDefaults(t *testing.T) {
 	}
 	if c.StateFile != "" || c.NoState {
 		t.Errorf("StateFile/NoState = %q/%v, want empty/false", c.StateFile, c.NoState)
+	}
+	if c.Metrics != DefaultMetrics || c.Color != ColorAuto {
+		t.Errorf("Metrics/Color = %q/%q, want %q/auto", c.Metrics, c.Color, DefaultMetrics)
+	}
+	if c.ConfigPath == "" {
+		t.Error("ConfigPath = empty, want resolved path")
 	}
 }
 
@@ -114,6 +123,9 @@ func TestParseRejectsInvalid(t *testing.T) {
 		{"bad log level", []string{"-log-level", "trace"}},
 		{"negative retries", []string{"-retries", "-1"}},
 		{"zero retry backoff", []string{"-retry-backoff", "0s"}},
+		{"bad metrics", []string{"-metrics", "network"}},
+		{"empty metrics", []string{"-metrics", ""}},
+		{"bad color", []string{"-color", "rainbow"}},
 		{"unknown flag", []string{"-nope"}},
 	}
 	for _, tt := range tests {
@@ -224,6 +236,31 @@ func TestEnvRetriesAndLogging(t *testing.T) {
 	}
 	if !c.NoState || c.StateFile != "/tmp/ey-state.json" {
 		t.Errorf("NoState/StateFile = %v/%q", c.NoState, c.StateFile)
+	}
+}
+
+func TestMetricsAndColorFlagsAndEnv(t *testing.T) {
+	clearEnv(t)
+	c, err := Parse([]string{"-metrics", "MEMORY,disk", "-color", "ALWAYS"})
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if c.Metrics != "disk,memory" {
+		t.Errorf("Metrics = %q, want disk,memory (normalized)", c.Metrics)
+	}
+	if c.Color != ColorAlways {
+		t.Errorf("Color = %q, want always", c.Color)
+	}
+
+	clearEnv(t)
+	t.Setenv("EY_METRICS", "cpu")
+	t.Setenv("EY_COLOR", "never")
+	c, err = Parse(nil)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if c.Metrics != "cpu" || c.Color != ColorNever {
+		t.Errorf("Metrics/Color = %q/%q, want cpu/never from env", c.Metrics, c.Color)
 	}
 }
 

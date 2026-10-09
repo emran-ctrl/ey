@@ -13,6 +13,8 @@ import (
 	"runtime"
 	"sync"
 	"time"
+
+	"ey/internal/fsutil"
 )
 
 // State is the persisted alert-policy snapshot. An empty LastSent means no
@@ -123,46 +125,10 @@ func (s *Store) Save() error {
 	if err != nil {
 		return fmt.Errorf("marshal state: %w", err)
 	}
-	if err := writeAtomic(s.path, data); err != nil {
+	if err := fsutil.WriteFileAtomic(s.path, data, 0o600); err != nil {
 		return err
 	}
 	s.dirty = false
 	s.logger.Debug("state saved", "path", s.path)
-	return nil
-}
-
-// writeAtomic writes data to path via a temp file and rename so readers never
-// observe a partially written file.
-func writeAtomic(path string, data []byte) error {
-	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return fmt.Errorf("create state dir: %w", err)
-	}
-
-	tmp, err := os.CreateTemp(dir, ".state-*.tmp")
-	if err != nil {
-		return fmt.Errorf("create temp state: %w", err)
-	}
-	tmpName := tmp.Name()
-	defer os.Remove(tmpName)
-
-	if err := tmp.Chmod(0o600); err != nil {
-		tmp.Close()
-		return fmt.Errorf("chmod temp state: %w", err)
-	}
-	if _, err := tmp.Write(data); err != nil {
-		tmp.Close()
-		return fmt.Errorf("write temp state: %w", err)
-	}
-	if err := tmp.Sync(); err != nil {
-		tmp.Close()
-		return fmt.Errorf("sync temp state: %w", err)
-	}
-	if err := tmp.Close(); err != nil {
-		return fmt.Errorf("close temp state: %w", err)
-	}
-	if err := os.Rename(tmpName, path); err != nil {
-		return fmt.Errorf("rename state: %w", err)
-	}
 	return nil
 }
