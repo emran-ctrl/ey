@@ -3,11 +3,14 @@ PKG     := ./cmd/ey
 BIN     := bin
 VERSION := $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 
-LDFLAGS := -s -w -X main.version=$(VERSION)
+LDFLAGS := -s -w -X ey/internal/config.BuildVersion=$(VERSION)
 
 PLATFORMS := linux/amd64 linux/arm64 darwin/amd64 darwin/arm64
 
-.PHONY: build run test vet fmt lint dist clean
+IMAGE := ey
+TAG   := $(VERSION)
+
+.PHONY: build run test vet fmt lint dist docker docker-run clean
 
 build:
 	go build -trimpath -ldflags '$(LDFLAGS)' -o $(BIN)/$(BINARY) $(PKG)
@@ -38,3 +41,9 @@ dist:
 
 clean:
 	rm -rf $(BIN)
+
+docker:
+	docker build --build-arg VERSION=$(VERSION) -t $(IMAGE):$(TAG) .
+
+docker-run:
+	docker run --rm --pid=host -v /:/host:ro $(IMAGE):$(TAG) -path /host -json

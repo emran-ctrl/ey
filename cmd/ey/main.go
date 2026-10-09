@@ -30,6 +30,11 @@ func run(args []string) int {
 		return 2
 	}
 
+	if cfg.ShowVersion {
+		fmt.Printf("ey %s\n", config.BuildVersion)
+		return 0
+	}
+
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 

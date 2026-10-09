@@ -1,11 +1,27 @@
 package config
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
 
+var envKeys = []string{
+	"EY_DISK_THRESHOLD", "EY_MEM_THRESHOLD", "EY_CPU_THRESHOLD",
+	"EY_PATH", "EY_WEBHOOK", "EY_FORMAT", "EY_DAEMON", "EY_INTERVAL",
+	"EY_ALERT_MODE", "EY_COOLDOWN", "EY_TIMEOUT", "EY_JSON", "EY_EXIT_CODE",
+}
+
+// clearEnv blanks every EY_* variable so tests are independent of the host.
+func clearEnv(t *testing.T) {
+	t.Helper()
+	for _, k := range envKeys {
+		t.Setenv(k, "")
+	}
+}
+
 func TestParseDefaults(t *testing.T) {
+	clearEnv(t)
 	c, err := Parse(nil)
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
@@ -31,6 +47,7 @@ func TestParseDefaults(t *testing.T) {
 }
 
 func TestParseOverrides(t *testing.T) {
+	clearEnv(t)
 	c, err := Parse([]string{
 		"-disk-threshold", "55.5",
 		"-mem-threshold", "70",
@@ -67,6 +84,7 @@ func TestParseOverrides(t *testing.T) {
 }
 
 func TestParseRejectsInvalid(t *testing.T) {
+	clearEnv(t)
 	tests := []struct {
 		name string
 		args []string
@@ -93,7 +111,78 @@ func TestParseRejectsInvalid(t *testing.T) {
 }
 
 func TestParseAcceptsValidWebhook(t *testing.T) {
+	clearEnv(t)
 	if _, err := Parse([]string{"-webhook", "https://discord.com/api/webhooks/1/token"}); err != nil {
 		t.Fatalf("Parse: %v", err)
+	}
+}
+
+func TestEnvDefaults(t *testing.T) {
+	clearEnv(t)
+	t.Setenv("EY_DISK_THRESHOLD", "42.5")
+	t.Setenv("EY_WEBHOOK", "https://hooks.slack.com/services/env")
+	t.Setenv("EY_FORMAT", "slack")
+	t.Setenv("EY_DAEMON", "true")
+	t.Setenv("EY_INTERVAL", "15s")
+	t.Setenv("EY_ALERT_MODE", "cooldown")
+	t.Setenv("EY_EXIT_CODE", "1")
+
+	c, err := Parse(nil)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if c.DiskThreshold != 42.5 {
+		t.Errorf("DiskThreshold = %g, want 42.5", c.DiskThreshold)
+	}
+	if c.Webhook != "https://hooks.slack.com/services/env" || c.Format != FormatSlack {
+		t.Errorf("Webhook/Format = %q/%q", c.Webhook, c.Format)
+	}
+	if !c.Daemon || c.Interval != 15*time.Second {
+		t.Errorf("Daemon/Interval = %v/%s", c.Daemon, c.Interval)
+	}
+	if c.AlertMode != AlertCooldown {
+		t.Errorf("AlertMode = %q, want cooldown", c.AlertMode)
+	}
+	if !c.ExitCode {
+		t.Error("ExitCode = false, want true")
+	}
+}
+
+func TestFlagOverridesEnv(t *testing.T) {
+	clearEnv(t)
+	t.Setenv("EY_DISK_THRESHOLD", "42.5")
+	t.Setenv("EY_INTERVAL", "15s")
+
+	c, err := Parse([]string{"-disk-threshold", "70", "-interval", "5s"})
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if c.DiskThreshold != 70 {
+		t.Errorf("DiskThreshold = %g, want flag value 70", c.DiskThreshold)
+	}
+	if c.Interval != 5*time.Second {
+		t.Errorf("Interval = %s, want flag value 5s", c.Interval)
+	}
+}
+
+func TestInvalidEnvWithNoFlagErrors(t *testing.T) {
+	clearEnv(t)
+	t.Setenv("EY_INTERVAL", "banana")
+
+	_, err := Parse(nil)
+	if err == nil {
+		t.Fatal("Parse = nil error, want error for invalid EY_INTERVAL")
+	}
+	if !strings.Contains(err.Error(), "EY_INTERVAL") {
+		t.Errorf("error %q should mention EY_INTERVAL", err)
+	}
+}
+
+func TestInvalidEnvIgnoredWhenFlagSet(t *testing.T) {
+	clearEnv(t)
+	t.Setenv("EY_INTERVAL", "banana")
+
+	if _, err := Parse([]string{"-interval", "5s"}); err != nil {
+		t.Fatalf("Parse: %v, invalid env must be ignored when flag is set", err)
 	}
 }
