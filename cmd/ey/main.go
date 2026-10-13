@@ -16,6 +16,7 @@ import (
 	"ey/internal/alerter"
 	"ey/internal/config"
 	"ey/internal/monitor"
+	"ey/internal/promexporter"
 	"ey/internal/state"
 	"ey/internal/wizard"
 )
@@ -51,6 +52,11 @@ func run(args []string) int {
 		return 2
 	}
 
+	if cfg.PrometheusListen != "" && !cfg.Daemon {
+		fmt.Fprintln(os.Stderr, "ey: -prometheus-listen requires -daemon")
+		return 2
+	}
+
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
@@ -73,6 +79,23 @@ func run(args []string) int {
 		Disk: cfg.DiskThreshold,
 		Mem:  cfg.MemThreshold,
 		CPU:  cfg.CPUThreshold,
+	}
+
+	if cfg.PrometheusListen != "" {
+		exp := promexporter.New(promexporter.Options{
+			Selection:  sel,
+			Thresholds: thresholds,
+			Version:    config.BuildVersion,
+			Logger:     logger,
+		})
+		srv, err := promexporter.Serve(ctx, cfg.PrometheusListen, exp.Handler(), logger)
+		if err != nil {
+			logger.Error("start prometheus endpoint", "err", err)
+			return 2
+		}
+		defer srv.Close(context.Background())
+		policy.sink = exp
+		logger.Info("prometheus metrics enabled", "addr", srv.Addr(), "path", "/metrics")
 	}
 
 	if !cfg.Daemon {
@@ -169,6 +192,13 @@ func openState(cfg *config.Config, logger *slog.Logger) (*state.Store, error) {
 	return state.Open(path, logger), nil
 }
 
+// metricsSink receives the outcome of each collection cycle. A nil sink is a
+// no-op, so callers that do not export metrics need not provide one.
+type metricsSink interface {
+	Observe(monitor.Snapshot, []monitor.Breach)
+	ObserveError(error)
+}
+
 // alertPolicy decides whether a given cycle of breaches should fire a webhook,
 // implementing the always / once / cooldown -alert-mode semantics. State is
 // persisted so the decision survives restarts.
@@ -177,6 +207,7 @@ type alertPolicy struct {
 	cooldown time.Duration
 	logger   *slog.Logger
 	store    *state.Store
+	sink     metricsSink
 
 	lastSent time.Time
 	armed    bool
@@ -244,10 +275,16 @@ func (p *alertPolicy) step(ctx context.Context, client *alerter.Client, th monit
 	snap, err := monitor.Collect(cfg.Path, cpuWindow, sel)
 	if err != nil {
 		p.logger.Error("collect metrics", "err", err)
+		if p.sink != nil {
+			p.sink.ObserveError(err)
+		}
 		return 2
 	}
 
 	breaches := monitor.Evaluate(snap, th, sel)
+	if p.sink != nil {
+		p.sink.Observe(snap, breaches)
+	}
 	output(cfg, snap, breaches, sel)
 	p.logMeasurements(snap, breaches, sel)
 

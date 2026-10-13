@@ -49,6 +49,8 @@ type File struct {
 
 	Metrics *metricList `yaml:"metrics,omitempty"`
 	Color   *string     `yaml:"color,omitempty"`
+
+	PrometheusListen *string `yaml:"prometheus_listen,omitempty"`
 }
 
 // Duration marshals to and from a Go duration string such as "30s" or "10m".
@@ -176,6 +178,7 @@ func (f *File) applyTo(c *Config) {
 		c.Metrics = joinList(*f.Metrics)
 	}
 	setEnum(&c.Color, f.Color)
+	setString(&c.PrometheusListen, f.PrometheusListen)
 }
 
 // Load returns the effective configuration from built-in defaults merged with
@@ -198,28 +201,29 @@ func Load(path string) (*Config, error) {
 // complete, hand-editable snapshot.
 func FromConfig(c *Config) *File {
 	return &File{
-		DiskThreshold: ptr(c.DiskThreshold),
-		MemThreshold:  ptr(c.MemThreshold),
-		CPUThreshold:  ptr(c.CPUThreshold),
-		Path:          ptr(c.Path),
-		Webhook:       ptr(c.Webhook),
-		Format:        ptr(string(c.Format)),
-		Daemon:        ptr(c.Daemon),
-		Interval:      durPtr(c.Interval),
-		AlertMode:     ptr(string(c.AlertMode)),
-		Cooldown:      durPtr(c.Cooldown),
-		Timeout:       durPtr(c.Timeout),
-		JSON:          ptr(c.JSON),
-		ExitCode:      ptr(c.ExitCode),
-		LogFormat:     ptr(string(c.LogFormat)),
-		LogLevel:      ptr(string(c.LogLevel)),
-		Quiet:         ptr(c.Quiet),
-		Retries:       ptr(c.Retries),
-		RetryBackoff:  durPtr(c.RetryBackoff),
-		StateFile:     ptr(c.StateFile),
-		NoState:       ptr(c.NoState),
-		Metrics:       metricsPtr(c.Metrics),
-		Color:         ptr(string(c.Color)),
+		DiskThreshold:    ptr(c.DiskThreshold),
+		MemThreshold:     ptr(c.MemThreshold),
+		CPUThreshold:     ptr(c.CPUThreshold),
+		Path:             ptr(c.Path),
+		Webhook:          ptr(c.Webhook),
+		Format:           ptr(string(c.Format)),
+		Daemon:           ptr(c.Daemon),
+		Interval:         durPtr(c.Interval),
+		AlertMode:        ptr(string(c.AlertMode)),
+		Cooldown:         durPtr(c.Cooldown),
+		Timeout:          durPtr(c.Timeout),
+		JSON:             ptr(c.JSON),
+		ExitCode:         ptr(c.ExitCode),
+		LogFormat:        ptr(string(c.LogFormat)),
+		LogLevel:         ptr(string(c.LogLevel)),
+		Quiet:            ptr(c.Quiet),
+		Retries:          ptr(c.Retries),
+		RetryBackoff:     durPtr(c.RetryBackoff),
+		StateFile:        ptr(c.StateFile),
+		NoState:          ptr(c.NoState),
+		Metrics:          metricsPtr(c.Metrics),
+		Color:            ptr(string(c.Color)),
+		PrometheusListen: ptr(c.PrometheusListen),
 	}
 }
 

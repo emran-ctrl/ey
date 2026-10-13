@@ -12,7 +12,7 @@ var envKeys = []string{
 	"EY_ALERT_MODE", "EY_COOLDOWN", "EY_TIMEOUT", "EY_JSON", "EY_EXIT_CODE",
 	"EY_LOG_FORMAT", "EY_LOG_LEVEL", "EY_QUIET", "EY_RETRIES",
 	"EY_RETRY_BACKOFF", "EY_STATE_FILE", "EY_NO_STATE",
-	"EY_METRICS", "EY_COLOR", "EY_CONFIG",
+	"EY_METRICS", "EY_COLOR", "EY_CONFIG", "EY_PROMETHEUS_LISTEN",
 }
 
 // clearEnv blanks every EY_* variable and points the config directory at an
@@ -60,6 +60,9 @@ func TestParseDefaults(t *testing.T) {
 	}
 	if c.Metrics != DefaultMetrics || c.Color != ColorAuto {
 		t.Errorf("Metrics/Color = %q/%q, want %q/auto", c.Metrics, c.Color, DefaultMetrics)
+	}
+	if c.PrometheusListen != "" {
+		t.Errorf("PrometheusListen = %q, want empty (disabled by default)", c.PrometheusListen)
 	}
 	if c.ConfigPath == "" {
 		t.Error("ConfigPath = empty, want resolved path")
@@ -126,6 +129,9 @@ func TestParseRejectsInvalid(t *testing.T) {
 		{"bad metrics", []string{"-metrics", "network"}},
 		{"empty metrics", []string{"-metrics", ""}},
 		{"bad color", []string{"-color", "rainbow"}},
+		{"bad prometheus listen missing port", []string{"-prometheus-listen", "9101"}},
+		{"bad prometheus listen port", []string{"-prometheus-listen", "127.0.0.1:99999"}},
+		{"bad prometheus listen non-numeric port", []string{"-prometheus-listen", "host:http"}},
 		{"unknown flag", []string{"-nope"}},
 	}
 	for _, tt := range tests {
@@ -261,6 +267,27 @@ func TestMetricsAndColorFlagsAndEnv(t *testing.T) {
 	}
 	if c.Metrics != "cpu" || c.Color != ColorNever {
 		t.Errorf("Metrics/Color = %q/%q, want cpu/never from env", c.Metrics, c.Color)
+	}
+}
+
+func TestPrometheusListenFlagAndEnv(t *testing.T) {
+	clearEnv(t)
+	c, err := Parse([]string{"-prometheus-listen", "127.0.0.1:9101"})
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if c.PrometheusListen != "127.0.0.1:9101" {
+		t.Errorf("PrometheusListen = %q, want 127.0.0.1:9101", c.PrometheusListen)
+	}
+
+	clearEnv(t)
+	t.Setenv("EY_PROMETHEUS_LISTEN", ":9101")
+	c, err = Parse(nil)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if c.PrometheusListen != ":9101" {
+		t.Errorf("PrometheusListen = %q, want :9101 from env", c.PrometheusListen)
 	}
 }
 

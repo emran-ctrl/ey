@@ -131,6 +131,17 @@ func Run(in io.Reader, out io.Writer, base *config.Config) (*config.Config, erro
 	if cfg.Interval, err = w.askDuration("Interval between checks in daemon mode", cfg.Interval); err != nil {
 		return nil, err
 	}
+	if cfg.PrometheusListen, err = w.ask("Prometheus metrics listen address (host:port; empty to disable, daemon only)", cfg.PrometheusListen, func(s string) error {
+		if s == "" {
+			return nil
+		}
+		if verr := config.ValidateListenAddr(s); verr != nil {
+			return verr
+		}
+		return nil
+	}); err != nil {
+		return nil, err
+	}
 	if cfg.ExitCode, err = w.askBool("Exit with code 1 when any threshold is breached", cfg.ExitCode); err != nil {
 		return nil, err
 	}
@@ -341,6 +352,7 @@ func (w *wizard) summarize(cfg *config.Config) {
 		fmt.Sprintf("Timeout:             %s", cfg.Timeout),
 		fmt.Sprintf("Daemon:              %t", cfg.Daemon),
 		fmt.Sprintf("Interval:            %s", cfg.Interval),
+		fmt.Sprintf("Prometheus listen:   %s", orDefault(cfg.PrometheusListen)),
 		fmt.Sprintf("JSON output:         %t", cfg.JSON),
 		fmt.Sprintf("Color:               %s", cfg.Color),
 		fmt.Sprintf("Log format:          %s", cfg.LogFormat),

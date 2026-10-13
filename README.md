@@ -9,12 +9,14 @@ usage, compares them against configurable thresholds, and fires a webhook alert
 (Slack, Discord, or a generic JSON endpoint) when a limit is exceeded. It runs
 either as a one-shot check or as a long-lived daemon.
 
-- Single static binary — no runtime dependencies
+- Single static binary — statically linked, no external services or runtime
+  dependencies
 - One-shot or daemon mode
 - Slack / Discord / generic webhook payloads with automatic detection
 - Alert policies: `always`, `once`, or `cooldown` (persisted across restarts)
 - Robust webhook delivery: retries on transport errors, `429`, and `5xx`
   with exponential backoff, full jitter, and `Retry-After` support
+- Prometheus metrics endpoint (`-prometheus-listen`) in daemon mode
 - Structured logging (`text` or `json`) to stderr, machine-readable metrics to
   stdout (`-json`)
 - Interactive configuration wizard (`ey config`) plus a YAML config file
@@ -34,6 +36,7 @@ either as a one-shot check or as a long-lived daemon.
   - [Alert modes](#alert-modes)
   - [State persistence](#state-persistence)
   - [Webhook retries](#webhook-retries)
+  - [Prometheus metrics](#prometheus-metrics)
 - [Deployment](#deployment)
   - [Docker](#docker)
   - [systemd](#systemd)
@@ -122,6 +125,9 @@ ey config
 
 # Only watch CPU, no color when piped.
 ey -metrics cpu -color never
+
+# Daemon mode with a Prometheus scrape endpoint.
+ey -daemon -prometheus-listen :9101
 ```
 
 Run `ey -h` to print the built-in flag help and `ey config -h` for the
@@ -162,6 +168,7 @@ simply ignored; a malformed one is a hard error.
 | `-retry-backoff` | `EY_RETRY_BACKOFF` | `500ms` | Base delay for retry backoff. |
 | `-state-file` | `EY_STATE_FILE` | *(per-user state dir)* | Override the alert state file path. |
 | `-no-state` | `EY_NO_STATE` | `false` | Disable persisting alert state to disk. |
+| `-prometheus-listen` | `EY_PROMETHEUS_LISTEN` | *(disabled)* | Serve Prometheus metrics on `host:port` (daemon mode only). |
 | `-config` | `EY_CONFIG` | *(per-user config dir)* | Path to the YAML config file. |
 | `-version` | — | | Print version and exit. |
 
@@ -198,6 +205,7 @@ retries: 3
 retry_backoff: 500ms
 state_file: ""
 no_state: false
+prometheus_listen: ""   # e.g. ":9101" to serve metrics in daemon mode
 ```
 
 The file is merged field-by-field, so a partial file such as
@@ -291,6 +299,53 @@ with full jitter, capped at 8s, and respects a server `Retry-After` header as a
 lower bound. Each attempt is bounded by `-timeout`, and cancelling the process
 (SIGINT/SIGTERM) aborts in-flight requests and backoff waits. Set `-retries 0`
 to disable retries.
+
+### Prometheus metrics
+
+In daemon mode `ey` can expose the metrics it collects on an HTTP endpoint for
+Prometheus to scrape. The endpoint is disabled by default; enable it with
+`-prometheus-listen host:port` (or `EY_PROMETHEUS_LISTEN`):
+
+```console
+ey -daemon -prometheus-listen :9101
+```
+
+Because the endpoint must stay up to be scraped, `-prometheus-listen` requires
+`-daemon`; setting it without `-daemon` is a hard error. Bare `:9101` binds all
+interfaces, so restrict access with a firewall or a reverse proxy, or bind a
+single interface such as `127.0.0.1:9101`. Only `GET /metrics` is routed; every
+other path returns `404`. Ports below 1024 require the `CAP_NET_BIND_SERVICE`
+capability.
+
+Only the metrics selected with `-metrics` are exported (a disabled metric is not
+registered at all). All series use the `ey_` prefix:
+
+| Metric | Labels | Meaning |
+| --- | --- | --- |
+| `ey_build_info` | `version` | Always `1`; carries the build version. |
+| `ey_disk_used_percent` | | Disk space used, as a percentage. |
+| `ey_disk_total_bytes` | | Total disk space in bytes. |
+| `ey_disk_used_bytes` | | Used disk space in bytes. |
+| `ey_memory_used_percent` | | Memory used, as a percentage. |
+| `ey_memory_total_bytes` | | Total memory in bytes. |
+| `ey_memory_used_bytes` | | Used memory in bytes. |
+| `ey_cpu_used_percent` | | CPU used, as a percentage. |
+| `ey_threshold_percent` | `metric` | Configured threshold for the metric. |
+| `ey_threshold_breached` | `metric` | `1` when the metric exceeded its threshold, else `0`. |
+| `ey_last_collect_timestamp_seconds` | | Unix time of the last successful collection. |
+| `ey_collect_errors_total` | | Failed collections since startup. |
+
+A scrape configuration looks like:
+
+```yaml
+scrape_configs:
+  - job_name: ey
+    static_configs:
+      - targets: ["127.0.0.1:9101"]
+```
+
+The systemd timer unit (`ey-alert.timer`) runs one-shot checks and therefore
+cannot be a scrape target; use the long-running `ey.service` for Prometheus.
 
 ## Deployment
 
@@ -454,6 +509,7 @@ cmd/ey/            CLI entry point, flag wiring, daemon loop, alert policy,
 internal/config/   Flag + EY_* environment parsing, YAML config file load/
                    write, validation
 internal/monitor/  Metric collection (gopsutil), selection, threshold eval
+internal/promexporter/ Prometheus registry and metrics HTTP endpoint
 internal/alerter/  Webhook payload formatting and retrying HTTP delivery
 internal/wizard/   Interactive config wizard (ey config)
 internal/state/    Atomic JSON state persistence
@@ -464,7 +520,9 @@ deploy/            systemd units and example EnvironmentFile
 ## Requirements
 
 - **Build:** Go 1.27
-- **Runtime:** none — the binary is static (Linux/macOS, amd64/arm64)
+- **Runtime:** none — the binary is statically linked and needs no external
+  services or interpreters (Linux/macOS, amd64/arm64). Go module dependencies:
+  `gopsutil`, `go.yaml.in/yaml/v3`, and `prometheus/client_golang`.
 - **Optional:** Docker (container image), systemd (service units),
   GoReleaser (release artifacts)
 

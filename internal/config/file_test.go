@@ -66,6 +66,7 @@ disk_threshold: 42
 interval: 30s
 alert_mode: cooldown
 color: always
+prometheus_listen: ":9101"
 `)
 	f, err := LoadFile(path)
 	if err != nil {
@@ -87,6 +88,9 @@ color: always
 	}
 	if c.Color != ColorAlways {
 		t.Errorf("Color = %q, want always", c.Color)
+	}
+	if c.PrometheusListen != ":9101" {
+		t.Errorf("PrometheusListen = %q, want :9101", c.PrometheusListen)
 	}
 }
 
@@ -119,28 +123,29 @@ func TestFileInvalidDurationErrors(t *testing.T) {
 
 func TestRoundTripWriteAndLoad(t *testing.T) {
 	c := &Config{
-		DiskThreshold: 55.5,
-		MemThreshold:  70,
-		CPUThreshold:  60,
-		Path:          "/var",
-		Webhook:       "https://hooks.slack.com/services/x",
-		Format:        FormatDiscord,
-		Daemon:        true,
-		Interval:      30 * time.Second,
-		AlertMode:     AlertCooldown,
-		Cooldown:      5 * time.Minute,
-		Timeout:       2 * time.Second,
-		JSON:          true,
-		ExitCode:      true,
-		LogFormat:     LogFormatJSON,
-		LogLevel:      LogLevelDebug,
-		Quiet:         true,
-		Retries:       1,
-		RetryBackoff:  2 * time.Second,
-		StateFile:     "/tmp/state.json",
-		NoState:       true,
-		Metrics:       "cpu,memory",
-		Color:         ColorNever,
+		DiskThreshold:    55.5,
+		MemThreshold:     70,
+		CPUThreshold:     60,
+		Path:             "/var",
+		Webhook:          "https://hooks.slack.com/services/x",
+		Format:           FormatDiscord,
+		Daemon:           true,
+		Interval:         30 * time.Second,
+		AlertMode:        AlertCooldown,
+		Cooldown:         5 * time.Minute,
+		Timeout:          2 * time.Second,
+		JSON:             true,
+		ExitCode:         true,
+		LogFormat:        LogFormatJSON,
+		LogLevel:         LogLevelDebug,
+		Quiet:            true,
+		Retries:          1,
+		RetryBackoff:     2 * time.Second,
+		StateFile:        "/tmp/state.json",
+		NoState:          true,
+		Metrics:          "cpu,memory",
+		Color:            ColorNever,
+		PrometheusListen: ":9101",
 	}
 
 	path := filepath.Join(t.TempDir(), "nested", "config.yaml")
@@ -206,7 +211,7 @@ func TestMarshalIncludesAllKeys(t *testing.T) {
 	for _, key := range []string{
 		"disk_threshold", "mem_threshold", "cpu_threshold", "path", "metrics",
 		"interval", "alert_mode", "cooldown", "timeout", "retries",
-		"retry_backoff", "color",
+		"retry_backoff", "color", "prometheus_listen",
 	} {
 		if !strings.Contains(string(data), key) {
 			t.Errorf("marshalled config missing key %q", key)

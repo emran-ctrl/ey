@@ -4,6 +4,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"net"
 	"net/url"
 	"os"
 	"strconv"
@@ -74,6 +75,8 @@ type Config struct {
 
 	Metrics string
 	Color   ColorMode
+
+	PrometheusListen string
 
 	Daemon   bool
 	Interval time.Duration
@@ -212,6 +215,8 @@ func (c *Config) register(fs *flag.FlagSet, d *Config, configPath string) (apply
 	fs.StringVar(&metrics, "metrics", metrics, "Comma-separated metrics to monitor: disk, memory, cpu")
 	color := stringDefault("EY_COLOR", string(d.Color))
 	fs.StringVar(&color, "color", color, "Colorize text output: auto, always, or never")
+
+	fs.StringVar(&c.PrometheusListen, "prometheus-listen", stringDefault("EY_PROMETHEUS_LISTEN", d.PrometheusListen), "Expose Prometheus metrics on host:port in daemon mode (empty disables)")
 
 	fs.StringVar(&c.ConfigPath, "config", configPath, "Path to the YAML configuration file")
 
@@ -412,11 +417,30 @@ func (c *Config) validate() error {
 	if c.Path == "" {
 		return fmt.Errorf("-path must not be empty")
 	}
+	if c.PrometheusListen != "" {
+		if err := ValidateListenAddr(c.PrometheusListen); err != nil {
+			return fmt.Errorf("invalid -prometheus-listen %q: %w", c.PrometheusListen, err)
+		}
+	}
 	if c.Webhook != "" {
 		u, err := url.Parse(c.Webhook)
 		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
 			return fmt.Errorf("invalid -webhook URL %q: must be an absolute http(s) URL", c.Webhook)
 		}
+	}
+	return nil
+}
+
+// ValidateListenAddr checks that addr is a syntactically valid host:port with a
+// port in range. It does not bind, so conflicting ports are caught at startup.
+func ValidateListenAddr(addr string) error {
+	_, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return errors.New("must be a host:port address")
+	}
+	n, err := strconv.Atoi(port)
+	if err != nil || n < 1 || n > 65535 {
+		return fmt.Errorf("port %q must be a number between 1 and 65535", port)
 	}
 	return nil
 }
