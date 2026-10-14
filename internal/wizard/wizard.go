@@ -66,6 +66,20 @@ func Run(in io.Reader, out io.Writer, base *config.Config) (*config.Config, erro
 	}
 
 	var v string
+	if cfg.ProcessCount, err = w.askInt("Top processes to list (process metric)", cfg.ProcessCount, 1); err != nil {
+		return nil, err
+	}
+	if v, err = w.askEnum("Rank top processes by", string(cfg.ProcessSort), "cpu", "memory"); err != nil {
+		return nil, err
+	}
+	cfg.ProcessSort = config.ProcessSort(v)
+	if cfg.ProcessThreshold, err = w.askFloat("Top process usage threshold (%)", cfg.ProcessThreshold, 0, 100); err != nil {
+		return nil, err
+	}
+	if cfg.ProcessCountThreshold, err = w.askInt("Process count threshold (0 to disable)", cfg.ProcessCountThreshold, 0); err != nil {
+		return nil, err
+	}
+
 	if v, err = w.askEnum("Webhook payload format", string(cfg.Format), "auto", "slack", "discord", "generic"); err != nil {
 		return nil, err
 	}
@@ -158,7 +172,7 @@ func (w *wizard) askMetrics(current string) (string, error) {
 		if current == "" {
 			current = DefaultMetrics
 		}
-		fmt.Fprintf(w.out, "Metrics to monitor (comma-separated: disk, memory, cpu) [%s]: ", current)
+		fmt.Fprintf(w.out, "Metrics to monitor (comma-separated: disk, memory, cpu, process) [%s]: ", current)
 		line, err := w.read()
 		if err != nil {
 			return "", err
@@ -333,6 +347,10 @@ func (w *wizard) summarize(cfg *config.Config) {
 		fmt.Sprintf("CPU threshold:       %.2f%%", cfg.CPUThreshold),
 		fmt.Sprintf("Path:                %s", cfg.Path),
 		fmt.Sprintf("Metrics:             %s", cfg.Metrics),
+		fmt.Sprintf("Top processes:       %d", cfg.ProcessCount),
+		fmt.Sprintf("Process sort:        %s", cfg.ProcessSort),
+		fmt.Sprintf("Process threshold:   %.2f%%", cfg.ProcessThreshold),
+		fmt.Sprintf("Process count max:   %d", cfg.ProcessCountThreshold),
 		fmt.Sprintf("Webhook:             %s", orDefault(cfg.Webhook)),
 		fmt.Sprintf("Format:              %s", cfg.Format),
 		fmt.Sprintf("Alert policy:        %s", cfg.AlertMode),

@@ -141,6 +141,11 @@ func TestRoundTripWriteAndLoad(t *testing.T) {
 		NoState:       true,
 		Metrics:       "cpu,memory",
 		Color:         ColorNever,
+
+		ProcessCount:          7,
+		ProcessSort:           ProcessSortMem,
+		ProcessThreshold:      65,
+		ProcessCountThreshold: 300,
 	}
 
 	path := filepath.Join(t.TempDir(), "nested", "config.yaml")
@@ -198,6 +203,43 @@ func TestPrecedenceFileEnvFlag(t *testing.T) {
 	}
 }
 
+func TestProcessMetricAutoEnableFromFile(t *testing.T) {
+	hasProcess := func(metrics string) bool {
+		for _, m := range strings.Split(metrics, ",") {
+			if m == "process" {
+				return true
+			}
+		}
+		return false
+	}
+
+	tests := []struct {
+		name string
+		yaml string
+		args []string
+		want bool
+	}{
+		{"file process option, no metrics", "process_count: 3\n", nil, true},
+		{"file has both metrics and process", "metrics: cpu,memory\nprocess_count: 3\n", nil, false},
+		{"file metrics includes process", "metrics: process\n", nil, true},
+		{"file process option, metrics flag excludes", "process_count: 3\n", []string{"-metrics", "cpu"}, false},
+		{"file metrics, process flag includes", "metrics: cpu,memory\n", []string{"-process-count", "3"}, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			clearEnv(t)
+			t.Setenv("EY_CONFIG", writeConfigFile(t, tt.yaml))
+			c, err := Parse(tt.args)
+			if err != nil {
+				t.Fatalf("Parse: %v", err)
+			}
+			if got := hasProcess(c.Metrics); got != tt.want {
+				t.Errorf("Metrics = %q, hasProcess = %v, want %v", c.Metrics, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestMarshalIncludesAllKeys(t *testing.T) {
 	data, err := Marshal(builtinDefaults())
 	if err != nil {
@@ -207,6 +249,7 @@ func TestMarshalIncludesAllKeys(t *testing.T) {
 		"disk_threshold", "mem_threshold", "cpu_threshold", "path", "metrics",
 		"interval", "alert_mode", "cooldown", "timeout", "retries",
 		"retry_backoff", "color",
+		"process_count", "process_sort", "process_threshold", "process_count_threshold",
 	} {
 		if !strings.Contains(string(data), key) {
 			t.Errorf("marshalled config missing key %q", key)

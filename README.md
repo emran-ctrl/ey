@@ -4,10 +4,10 @@
 [![Release](https://img.shields.io/github/v/release/emran-ctrl/ey)](https://github.com/emran-ctrl/ey/releases)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-A small CLI system monitor written in Go. `ey` samples disk, memory, and CPU
-usage, compares them against configurable thresholds, and fires a webhook alert
-(Slack, Discord, or a generic JSON endpoint) when a limit is exceeded. It runs
-either as a one-shot check or as a long-lived daemon.
+A small CLI system monitor written in Go. `ey` samples disk, memory, CPU, and
+top-process usage, compares them against configurable thresholds, and fires a
+webhook alert (Slack, Discord, or a generic JSON endpoint) when a limit is
+exceeded. It runs either as a one-shot check or as a long-lived daemon.
 
 - Single static binary — no runtime dependencies
 - One-shot or daemon mode
@@ -19,6 +19,7 @@ either as a one-shot check or as a long-lived daemon.
   stdout (`-json`)
 - Interactive configuration wizard (`ey config`) plus a YAML config file
 - Pick which metrics to collect (`-metrics`), colorize output (`-color`)
+- Top-process tracking (`-metrics process`) with CPU/memory ranking and alerts
 - Docker image and hardened systemd units included
 
 ## Contents
@@ -122,6 +123,9 @@ ey config
 
 # Only watch CPU, no color when piped.
 ey -metrics cpu -color never
+
+# Showing top processes implies the process metric, so -metrics is optional.
+ey -process-count 8 -process-sort memory -process-threshold 80
 ```
 
 Run `ey -h` to print the built-in flag help and `ey config -h` for the
@@ -144,7 +148,11 @@ simply ignored; a malformed one is a hard error.
 | `-mem-threshold` | `EY_MEM_THRESHOLD` | `90` | Memory usage percent that triggers an alert (0–100). |
 | `-cpu-threshold` | `EY_CPU_THRESHOLD` | `90` | CPU usage percent that triggers an alert (0–100). |
 | `-path` | `EY_PATH` | `/` | Filesystem path whose usage is checked. |
-| `-metrics` | `EY_METRICS` | `disk,memory,cpu` | Comma-separated metrics to monitor. |
+| `-metrics` | `EY_METRICS` | `disk,memory,cpu` | Comma-separated metrics to monitor (`disk`, `memory`, `cpu`, `process`). |
+| `-process-count` | `EY_PROCESS_COUNT` | `5` | Number of top processes to display; implies the `process` metric. |
+| `-process-sort` | `EY_PROCESS_SORT` | `cpu` | Rank top processes by `cpu` or `memory`. |
+| `-process-threshold` | `EY_PROCESS_THRESHOLD` | `90` | Alert when the top process's usage percent (in the sort dimension) exceeds this. |
+| `-process-count-threshold` | `EY_PROCESS_COUNT_THRESHOLD` | `0` | Alert when the total process count exceeds this (`0` disables). |
 | `-webhook` | `EY_WEBHOOK` | *(none)* | Slack, Discord, or generic webhook URL. |
 | `-format` | `EY_FORMAT` | `auto` | Payload format: `auto`, `slack`, `discord`, or `generic`. |
 | `-daemon` | `EY_DAEMON` | `false` | Run continuously instead of a single check. |
@@ -198,6 +206,12 @@ retries: 3
 retry_backoff: 500ms
 state_file: ""
 no_state: false
+
+# Top-process metric (used when "process" is in metrics).
+process_count: 5
+process_sort: cpu
+process_threshold: 90
+process_count_threshold: 0
 ```
 
 The file is merged field-by-field, so a partial file such as
@@ -250,7 +264,12 @@ else → generic.
       "mem_used_percent": 68.5,
       "mem_total_bytes": 16428015616,
       "mem_used_bytes": 11264143360,
-      "cpu_used_percent": 12.4
+      "cpu_used_percent": 12.4,
+      "process_count": 312,
+      "process_top_percent": 42.7,
+      "processes": [
+        {"pid": 4821, "name": "chrome", "cpu_percent": 42.7, "rss_bytes": 1288490188, "mem_percent": 7.8}
+      ]
     },
     "breaches": [
       {"metric": "disk", "value": 91.2, "threshold": 80}
@@ -380,6 +399,31 @@ One-shot JSON (with `-metrics cpu,memory`):
 ```
 
 `breaches` is included only when at least one threshold is exceeded.
+
+### Top processes
+
+The process metric is enabled either by naming `process` in `-metrics`, or
+implicitly by setting any `-process-*` option (or its `EY_PROCESS_*` / YAML
+equivalent). An explicit metric selection at the same or a higher precedence
+level still wins: `-metrics cpu -process-count 8` shows CPU only, whereas a CLI
+`-process-count` overrides a `metrics:` list in the config file.
+
+When enabled, `ey` samples per-process CPU over a one-second window and lists
+the top `-process-count` processes ranked by `-process-sort` (`cpu` or
+`memory`). Text output adds a table:
+
+```text
+Processes: 312 running
+Top 5 by cpu:
+  4821   chrome                    42.7% cpu     7.8% mem    1228.6 MiB
+  918    node                      18.2% cpu     2.1% mem     331.0 MiB
+```
+
+JSON output adds `process_count`, `process_top_percent`, and a `processes`
+array (each entry has `pid`, `name`, `cpu_percent`, `rss_bytes`, and
+`mem_percent`). Two breaches are evaluated: `process` when the top consumer's
+usage percent exceeds `-process-threshold`, and `process_count` when the total
+process count exceeds `-process-count-threshold` (disabled when `0`).
 
 ## Exit codes
 

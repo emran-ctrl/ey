@@ -28,6 +28,11 @@ func baseConfig() *config.Config {
 		RetryBackoff:  500 * time.Millisecond,
 		Metrics:       "disk,memory,cpu",
 		Color:         config.ColorAuto,
+
+		ProcessCount:          5,
+		ProcessSort:           config.ProcessSortCPU,
+		ProcessThreshold:      90,
+		ProcessCountThreshold: 0,
 	}
 }
 
@@ -40,7 +45,7 @@ func runScript(t *testing.T, base *config.Config, lines []string) (*config.Confi
 
 func TestRunKeepsDefaults(t *testing.T) {
 	base := baseConfig()
-	lines := make([]string, 23)
+	lines := make([]string, 27)
 	got, err := runScript(t, base, lines)
 	if err != nil {
 		t.Fatalf("Run: %v", err)
@@ -55,6 +60,10 @@ func TestRunOverridesValues(t *testing.T) {
 		"95",       // disk threshold
 		"", "", "", // mem, cpu, path
 		"cpu,disk",                             // metrics
+		"",                                     // process count
+		"",                                     // process sort
+		"",                                     // process threshold
+		"",                                     // process count threshold
 		"discord",                              // format
 		"https://hooks.slack.com/services/abc", // webhook
 		"once",                                 // alert mode
@@ -109,6 +118,10 @@ func TestRunRePromptsUntilValid(t *testing.T) {
 		"",      // cpu
 		"",      // path
 		"",      // metrics
+		"",      // process count
+		"",      // process sort
+		"",      // process threshold
+		"",      // process count threshold
 		"xml",   // invalid format -> reprompt
 		"slack", // valid format
 		"",      // webhook
@@ -142,7 +155,7 @@ func TestRunRePromptsUntilValid(t *testing.T) {
 }
 
 func TestRunAbortsWhenDeclined(t *testing.T) {
-	lines := make([]string, 22)
+	lines := make([]string, 26)
 	lines = append(lines, "n")
 	_, err := runScript(t, baseConfig(), lines)
 	if !errors.Is(err, ErrAborted) {
@@ -152,13 +165,14 @@ func TestRunAbortsWhenDeclined(t *testing.T) {
 
 func TestRunRejectsBadWebhookAndReprompts(t *testing.T) {
 	lines := []string{
-		"", "", "", "", "", // thresholds and path
-		"",                                                             // metrics
-		"",                                                             // format
-		"ftp://bad",                                                    // invalid webhook -> reprompt
-		"",                                                             // valid webhook (keep default = empty)
-		"", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", // remaining prompts
-		"y",
+		"", "", "", "", // disk, memory, cpu, path
+		"",             // metrics
+		"", "", "", "", // process count, sort, threshold, count threshold
+		"",                                                         // format
+		"ftp://bad",                                                // invalid webhook -> reprompt
+		"",                                                         // valid webhook (keep default = empty)
+		"", "", "", "", "", "", "", "", "", "", "", "", "", "", "", // remaining prompts (alert mode .. no state)
+		"y", // write
 	}
 	got, err := runScript(t, baseConfig(), lines)
 	if err != nil {

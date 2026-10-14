@@ -55,7 +55,9 @@ func TestParseSelection(t *testing.T) {
 		in   string
 		want Selection
 	}{
-		{"disk,memory,cpu", AllSelection()},
+		{"disk,memory,cpu", Selection{Disk: true, Mem: true, CPU: true}},
+		{"disk,memory,cpu,process", AllSelection()},
+		{"process", Selection{Process: true}},
 		{"cpu,disk", Selection{Disk: true, CPU: true}},
 		{"memory memory", Selection{Mem: true}},
 		{" DISK ,cpu ", Selection{Disk: true, CPU: true}},
@@ -98,6 +100,59 @@ func TestGiB(t *testing.T) {
 	}
 	if got := GiB(0); got != 0 {
 		t.Errorf("GiB(0) = %g, want 0", got)
+	}
+}
+
+func TestEvaluateProcess(t *testing.T) {
+	sel := Selection{Process: true}
+
+	th := Thresholds{Process: 90, ProcessCount: 0}
+	snap := Snapshot{ProcessTopPercent: 95, ProcessCount: 400}
+	breaches := Evaluate(snap, th, sel)
+	if len(breaches) != 1 || breaches[0].Metric != "process" {
+		t.Fatalf("got %v, want [process]", breaches)
+	}
+
+	th = Thresholds{Process: 100, ProcessCount: 300}
+	breaches = Evaluate(snap, th, sel)
+	if len(breaches) != 1 || breaches[0].Metric != "process_count" {
+		t.Fatalf("got %v, want [process_count]", breaches)
+	}
+
+	th = Thresholds{Process: 90, ProcessCount: 300}
+	breaches = Evaluate(snap, th, sel)
+	if len(breaches) != 2 {
+		t.Fatalf("got %v, want both breaches", breaches)
+	}
+
+	if got := Evaluate(snap, th, Selection{}); len(got) != 0 {
+		t.Fatalf("process disabled got %v, want none", got)
+	}
+}
+
+func TestTopProcesses(t *testing.T) {
+	procs, total, err := TopProcesses(5, SortCPU, 100*time.Millisecond)
+	if err != nil {
+		t.Fatalf("TopProcesses: %v", err)
+	}
+	if total <= 0 {
+		t.Fatalf("total = %d, want > 0", total)
+	}
+	if len(procs) == 0 || len(procs) > 5 {
+		t.Fatalf("len(procs) = %d, want 1..5", len(procs))
+	}
+	for _, p := range procs {
+		if p.PID <= 0 {
+			t.Errorf("PID = %d, want > 0", p.PID)
+		}
+		if p.Name == "" {
+			t.Error("Name is empty")
+		}
+	}
+	for i := 1; i < len(procs); i++ {
+		if procs[i-1].Value(SortCPU) < procs[i].Value(SortCPU) {
+			t.Errorf("not sorted by cpu: %v then %v", procs[i-1], procs[i])
+		}
 	}
 }
 

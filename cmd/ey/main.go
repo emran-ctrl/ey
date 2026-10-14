@@ -70,9 +70,11 @@ func run(args []string) int {
 	policy := newAlertPolicy(cfg, store, logger)
 
 	thresholds := monitor.Thresholds{
-		Disk: cfg.DiskThreshold,
-		Mem:  cfg.MemThreshold,
-		CPU:  cfg.CPUThreshold,
+		Disk:         cfg.DiskThreshold,
+		Mem:          cfg.MemThreshold,
+		CPU:          cfg.CPUThreshold,
+		Process:      cfg.ProcessThreshold,
+		ProcessCount: cfg.ProcessCountThreshold,
 	}
 
 	if !cfg.Daemon {
@@ -247,6 +249,19 @@ func (p *alertPolicy) step(ctx context.Context, client *alerter.Client, th monit
 		return 2
 	}
 
+	if sel.Process {
+		procs, total, err := monitor.TopProcesses(cfg.ProcessCount, monitor.SortKey(cfg.ProcessSort), processSampleWindow)
+		if err != nil {
+			p.logger.Error("collect processes", "err", err)
+		} else {
+			snap.Processes = procs
+			snap.ProcessCount = total
+			if len(procs) > 0 {
+				snap.ProcessTopPercent = procs[0].Value(monitor.SortKey(cfg.ProcessSort))
+			}
+		}
+	}
+
 	breaches := monitor.Evaluate(snap, th, sel)
 	output(cfg, snap, breaches, sel)
 	p.logMeasurements(snap, breaches, sel)
@@ -280,6 +295,9 @@ func (p *alertPolicy) logMeasurements(s monitor.Snapshot, breaches []monitor.Bre
 	if sel.CPU {
 		attrs = append(attrs, "cpu_percent", round2(s.CPUUsedPercent))
 	}
+	if sel.Process {
+		attrs = append(attrs, "process_count", s.ProcessCount, "process_top_percent", round2(s.ProcessTopPercent))
+	}
 	p.logger.Info("check complete", attrs...)
 	for _, b := range breaches {
 		p.logger.Warn("threshold breached",
@@ -294,6 +312,10 @@ func round2(v float64) float64 {
 // cpuSampleWindow is how long cpu.Percent blocks to sample utilization on a
 // cold start; later daemon cycles use the delta since the previous tick.
 const cpuSampleWindow = time.Second
+
+// processSampleWindow is how long the top-process sampler observes per-process
+// CPU usage before ranking.
+const processSampleWindow = time.Second
 
 func output(cfg *config.Config, s monitor.Snapshot, breaches []monitor.Breach, sel monitor.Selection) {
 	// In daemon mode metrics are logged; stdout is only used for -json so that
@@ -326,6 +348,11 @@ func output(cfg *config.Config, s monitor.Snapshot, breaches []monitor.Breach, s
 		if sel.CPU {
 			out["cpu_used_percent"] = s.CPUUsedPercent
 		}
+		if sel.Process {
+			out["process_count"] = s.ProcessCount
+			out["process_top_percent"] = s.ProcessTopPercent
+			out["processes"] = s.Processes
+		}
 		if err := enc.Encode(out); err != nil {
 			fmt.Fprintf(os.Stderr, "ey: encode output: %v\n", err)
 		}
@@ -350,6 +377,16 @@ func output(cfg *config.Config, s monitor.Snapshot, breaches []monitor.Breach, s
 	if sel.CPU {
 		paintValue(color, "CPU Usage", fmt.Sprintf("%.2f%%", s.CPUUsedPercent), breached["cpu"])
 	}
+	if sel.Process {
+		paintValue(color, "Processes", fmt.Sprintf("%d running", s.ProcessCount), breached["process"] || breached["process_count"])
+		if len(s.Processes) > 0 {
+			fmt.Printf("Top %d by %s:\n", len(s.Processes), cfg.ProcessSort)
+			for _, pr := range s.Processes {
+				fmt.Printf("  %-6d %-24.24s %6.1f%% cpu  %6.1f%% mem  %6.1f MiB\n",
+					pr.PID, pr.Name, pr.CPUPercent, pr.MemPercent, float64(pr.RSSBytes)/(1<<20))
+			}
+		}
+	}
 
 	if len(breaches) == 0 {
 		fmt.Println(paint(color, true, "Status: OK (all thresholds satisfied)"))
@@ -357,8 +394,16 @@ func output(cfg *config.Config, s monitor.Snapshot, breaches []monitor.Breach, s
 	}
 	fmt.Println(paint(color, false, "Threshold breaches:"))
 	for _, b := range breaches {
-		fmt.Printf("  - %s: %.2f%% > %.2f%%\n", b.Metric, b.Value, b.Threshold)
+		fmt.Printf("  - %s\n", formatBreach(b))
 	}
+}
+
+// formatBreach renders a breach, using a count format for process_count.
+func formatBreach(b monitor.Breach) string {
+	if b.Metric == "process_count" {
+		return fmt.Sprintf("%s: %.0f > %.0f", b.Metric, b.Value, b.Threshold)
+	}
+	return fmt.Sprintf("%s: %.2f%% > %.2f%%", b.Metric, b.Value, b.Threshold)
 }
 
 // useColor decides whether to emit ANSI color, honoring -color.

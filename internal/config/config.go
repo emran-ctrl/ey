@@ -55,8 +55,16 @@ const (
 // DefaultMetrics is the set of metrics collected when none is configured.
 const DefaultMetrics = "disk,memory,cpu"
 
+// ProcessSort selects the dimension used to rank the top-process list.
+type ProcessSort string
+
+const (
+	ProcessSortCPU ProcessSort = "cpu"
+	ProcessSortMem ProcessSort = "memory"
+)
+
 // metricOrder is the canonical ordering used to normalize metric selections.
-var metricOrder = []string{"disk", "memory", "cpu"}
+var metricOrder = []string{"disk", "memory", "cpu", "process"}
 
 // BuildVersion is injected at build time via -ldflags "-X ey/internal/config.BuildVersion=...".
 var BuildVersion = "dev"
@@ -74,6 +82,11 @@ type Config struct {
 
 	Metrics string
 	Color   ColorMode
+
+	ProcessCount          int
+	ProcessSort           ProcessSort
+	ProcessThreshold      float64
+	ProcessCountThreshold int
 
 	Daemon   bool
 	Interval time.Duration
@@ -209,9 +222,15 @@ func (c *Config) register(fs *flag.FlagSet, d *Config, configPath string) (apply
 	fs.BoolVar(&c.NoState, "no-state", boolDefault("no-state", "EY_NO_STATE", d.NoState), "Disable persisting alert state to disk")
 
 	metrics := stringDefault("EY_METRICS", d.Metrics)
-	fs.StringVar(&metrics, "metrics", metrics, "Comma-separated metrics to monitor: disk, memory, cpu")
+	fs.StringVar(&metrics, "metrics", metrics, "Comma-separated metrics to monitor: disk, memory, cpu, process")
 	color := stringDefault("EY_COLOR", string(d.Color))
 	fs.StringVar(&color, "color", color, "Colorize text output: auto, always, or never")
+
+	fs.IntVar(&c.ProcessCount, "process-count", intDefault("process-count", "EY_PROCESS_COUNT", d.ProcessCount), "Number of top processes to show (implies the process metric)")
+	processSort := stringDefault("EY_PROCESS_SORT", string(d.ProcessSort))
+	fs.StringVar(&processSort, "process-sort", processSort, "Rank top processes by: cpu or memory")
+	fs.Float64Var(&c.ProcessThreshold, "process-threshold", floatDefault("process-threshold", "EY_PROCESS_THRESHOLD", d.ProcessThreshold), "Alert when the top process's usage percent (in the sort dimension) exceeds this")
+	fs.IntVar(&c.ProcessCountThreshold, "process-count-threshold", intDefault("process-count-threshold", "EY_PROCESS_COUNT_THRESHOLD", d.ProcessCountThreshold), "Alert when the total process count exceeds this (0 disables)")
 
 	fs.StringVar(&c.ConfigPath, "config", configPath, "Path to the YAML configuration file")
 
@@ -222,6 +241,7 @@ func (c *Config) register(fs *flag.FlagSet, d *Config, configPath string) (apply
 		c.LogLevel = LogLevel(logLevel)
 		c.Metrics = metrics
 		c.Color = ColorMode(color)
+		c.ProcessSort = ProcessSort(processSort)
 	}, envErrs
 }
 
@@ -275,6 +295,54 @@ func joinList(list []string) string {
 	return strings.Join(list, ",")
 }
 
+// Precedence levels used to decide whether an implicitly requested process
+// metric may override an explicit metric selection.
+const (
+	levelNone = iota - 1 // no source set
+	levelFile
+	levelEnv
+	levelFlag
+)
+
+// processOptionLevel returns the highest precedence level at which a
+// process-specific option was set (flag > env > config file), or levelNone.
+func processOptionLevel(set map[string]bool, file *File) int {
+	level := levelNone
+	for _, name := range []string{"process-count", "process-sort", "process-threshold", "process-count-threshold"} {
+		if set[name] {
+			return levelFlag
+		}
+	}
+	for _, key := range []string{"EY_PROCESS_COUNT", "EY_PROCESS_SORT", "EY_PROCESS_THRESHOLD", "EY_PROCESS_COUNT_THRESHOLD"} {
+		if v, ok := os.LookupEnv(key); ok && v != "" {
+			level = levelEnv
+		}
+	}
+	if file != nil && (file.ProcessCount != nil || file.ProcessSort != nil ||
+		file.ProcessThreshold != nil || file.ProcessCountThreshold != nil) {
+		if level < levelFile {
+			level = levelFile
+		}
+	}
+	return level
+}
+
+// metricsLevel returns the precedence level at which the metric selection was
+// given (flag > env > config file), or levelNone when it falls back to the
+// built-in default.
+func metricsLevel(set map[string]bool, file *File) int {
+	if set["metrics"] {
+		return levelFlag
+	}
+	if v, ok := os.LookupEnv("EY_METRICS"); ok && v != "" {
+		return levelEnv
+	}
+	if file != nil && file.Metrics != nil {
+		return levelFile
+	}
+	return levelNone
+}
+
 // NormalizeMetrics validates a metric selection and returns its canonical,
 // deduplicated, comma-separated form.
 func NormalizeMetrics(s string) (string, error) {
@@ -282,14 +350,14 @@ func NormalizeMetrics(s string) (string, error) {
 	for _, raw := range splitList(s) {
 		m := strings.ToLower(strings.TrimSpace(raw))
 		switch m {
-		case "disk", "memory", "cpu":
+		case "disk", "memory", "cpu", "process":
 			seen[m] = true
 		default:
-			return "", fmt.Errorf("invalid -metrics entry %q: must be disk, memory, or cpu", raw)
+			return "", fmt.Errorf("invalid -metrics entry %q: must be disk, memory, cpu, or process", raw)
 		}
 	}
 	if len(seen) == 0 {
-		return "", fmt.Errorf("-metrics must include at least one of disk, memory, or cpu")
+		return "", fmt.Errorf("-metrics must include at least one of disk, memory, cpu, or process")
 	}
 	out := make([]string, 0, len(seen))
 	for _, m := range metricOrder {
@@ -329,6 +397,13 @@ func Parse(args []string) (*Config, error) {
 	if len(envMessages) > 0 {
 		fs.Usage()
 		return nil, errors.New(strings.Join(envMessages, "; "))
+	}
+
+	// Setting a process-specific option at a higher precedence than the metric
+	// selection implies the process metric; an explicit selection at the same
+	// or higher level still wins.
+	if processOptionLevel(set, file) > metricsLevel(set, file) {
+		c.Metrics = joinList(append(splitList(c.Metrics), "process"))
 	}
 
 	if err := c.validate(); err != nil {
@@ -391,6 +466,22 @@ func (c *Config) validate() error {
 		c.Color = ColorMode(strings.ToLower(string(c.Color)))
 	default:
 		return fmt.Errorf("invalid -color %q: must be auto, always, or never", c.Color)
+	}
+
+	switch ProcessSort(strings.ToLower(string(c.ProcessSort))) {
+	case ProcessSortCPU, ProcessSortMem:
+		c.ProcessSort = ProcessSort(strings.ToLower(string(c.ProcessSort)))
+	default:
+		return fmt.Errorf("invalid -process-sort %q: must be cpu or memory", c.ProcessSort)
+	}
+	if c.ProcessCount < 1 {
+		return fmt.Errorf("-process-count must be at least 1, got %d", c.ProcessCount)
+	}
+	if c.ProcessThreshold < 0 || c.ProcessThreshold > 100 {
+		return fmt.Errorf("-process-threshold must be between 0 and 100, got %g", c.ProcessThreshold)
+	}
+	if c.ProcessCountThreshold < 0 {
+		return fmt.Errorf("-process-count-threshold must not be negative, got %d", c.ProcessCountThreshold)
 	}
 
 	if c.Retries < 0 {

@@ -13,6 +13,7 @@ var envKeys = []string{
 	"EY_LOG_FORMAT", "EY_LOG_LEVEL", "EY_QUIET", "EY_RETRIES",
 	"EY_RETRY_BACKOFF", "EY_STATE_FILE", "EY_NO_STATE",
 	"EY_METRICS", "EY_COLOR", "EY_CONFIG",
+	"EY_PROCESS_COUNT", "EY_PROCESS_SORT", "EY_PROCESS_THRESHOLD", "EY_PROCESS_COUNT_THRESHOLD",
 }
 
 // clearEnv blanks every EY_* variable and points the config directory at an
@@ -60,6 +61,10 @@ func TestParseDefaults(t *testing.T) {
 	}
 	if c.Metrics != DefaultMetrics || c.Color != ColorAuto {
 		t.Errorf("Metrics/Color = %q/%q, want %q/auto", c.Metrics, c.Color, DefaultMetrics)
+	}
+	if c.ProcessCount != 5 || c.ProcessSort != ProcessSortCPU || c.ProcessThreshold != 90 || c.ProcessCountThreshold != 0 {
+		t.Errorf("process defaults = %d/%q/%g/%d, want 5/cpu/90/0",
+			c.ProcessCount, c.ProcessSort, c.ProcessThreshold, c.ProcessCountThreshold)
 	}
 	if c.ConfigPath == "" {
 		t.Error("ConfigPath = empty, want resolved path")
@@ -126,6 +131,10 @@ func TestParseRejectsInvalid(t *testing.T) {
 		{"bad metrics", []string{"-metrics", "network"}},
 		{"empty metrics", []string{"-metrics", ""}},
 		{"bad color", []string{"-color", "rainbow"}},
+		{"bad process sort", []string{"-process-sort", "disk"}},
+		{"zero process count", []string{"-process-count", "0"}},
+		{"process threshold high", []string{"-process-threshold", "101"}},
+		{"negative process count threshold", []string{"-process-count-threshold", "-1"}},
 		{"unknown flag", []string{"-nope"}},
 	}
 	for _, tt := range tests {
@@ -172,6 +181,41 @@ func TestEnvDefaults(t *testing.T) {
 	}
 	if !c.ExitCode {
 		t.Error("ExitCode = false, want true")
+	}
+}
+
+func TestProcessOptions(t *testing.T) {
+	clearEnv(t)
+
+	c, err := Parse([]string{
+		"-process-count", "12",
+		"-process-sort", "MEMORY",
+		"-process-threshold", "75",
+		"-process-count-threshold", "500",
+	})
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if c.ProcessCount != 12 || c.ProcessSort != ProcessSortMem || c.ProcessThreshold != 75 || c.ProcessCountThreshold != 500 {
+		t.Errorf("process options = %d/%q/%g/%d, want 12/memory/75/500",
+			c.ProcessCount, c.ProcessSort, c.ProcessThreshold, c.ProcessCountThreshold)
+	}
+}
+
+func TestProcessEnv(t *testing.T) {
+	clearEnv(t)
+	t.Setenv("EY_PROCESS_COUNT", "8")
+	t.Setenv("EY_PROCESS_SORT", "memory")
+	t.Setenv("EY_PROCESS_THRESHOLD", "70")
+	t.Setenv("EY_PROCESS_COUNT_THRESHOLD", "200")
+
+	c, err := Parse(nil)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if c.ProcessCount != 8 || c.ProcessSort != ProcessSortMem || c.ProcessThreshold != 70 || c.ProcessCountThreshold != 200 {
+		t.Errorf("process env = %d/%q/%g/%d, want 8/memory/70/200",
+			c.ProcessCount, c.ProcessSort, c.ProcessThreshold, c.ProcessCountThreshold)
 	}
 }
 
@@ -261,6 +305,52 @@ func TestMetricsAndColorFlagsAndEnv(t *testing.T) {
 	}
 	if c.Metrics != "cpu" || c.Color != ColorNever {
 		t.Errorf("Metrics/Color = %q/%q, want cpu/never from env", c.Metrics, c.Color)
+	}
+}
+
+func TestProcessMetricAutoEnable(t *testing.T) {
+	hasProcess := func(metrics string) bool {
+		for _, m := range strings.Split(metrics, ",") {
+			if m == "process" {
+				return true
+			}
+		}
+		return false
+	}
+
+	for _, tt := range []struct {
+		name      string
+		envMetric string
+		envProc   string
+		args      []string
+		want      bool
+	}{
+		{"flag process-count", "", "", []string{"-process-count", "8"}, true},
+		{"flag process-sort", "", "", []string{"-process-sort", "memory"}, true},
+		{"flag process-threshold", "", "", []string{"-process-threshold", "75"}, true},
+		{"flag process-count-threshold", "", "", []string{"-process-count-threshold", "500"}, true},
+		{"flag metrics without process wins", "", "", []string{"-metrics", "cpu", "-process-count", "8"}, false},
+		{"flag metrics with process", "", "", []string{"-metrics", "cpu,process"}, true},
+		{"env process-count", "", "8", nil, true},
+		{"env process-count overridden by metrics flag", "", "8", []string{"-metrics", "cpu"}, false},
+		{"flag process beats env metrics", "cpu", "", []string{"-process-count", "8"}, true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			clearEnv(t)
+			if tt.envMetric != "" {
+				t.Setenv("EY_METRICS", tt.envMetric)
+			}
+			if tt.envProc != "" {
+				t.Setenv("EY_PROCESS_COUNT", tt.envProc)
+			}
+			c, err := Parse(tt.args)
+			if err != nil {
+				t.Fatalf("Parse: %v", err)
+			}
+			if got := hasProcess(c.Metrics); got != tt.want {
+				t.Errorf("Metrics = %q, hasProcess = %v, want %v", c.Metrics, got, tt.want)
+			}
+		})
 	}
 }
 
