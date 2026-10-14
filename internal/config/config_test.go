@@ -14,6 +14,7 @@ var envKeys = []string{
 	"EY_RETRY_BACKOFF", "EY_STATE_FILE", "EY_NO_STATE",
 	"EY_METRICS", "EY_COLOR", "EY_CONFIG",
 	"EY_PROCESS_COUNT", "EY_PROCESS_SORT", "EY_PROCESS_THRESHOLD", "EY_PROCESS_COUNT_THRESHOLD",
+	"EY_PROMETHEUS_LISTEN",
 }
 
 // clearEnv blanks every EY_* variable and points the config directory at an
@@ -65,6 +66,9 @@ func TestParseDefaults(t *testing.T) {
 	if c.ProcessCount != 5 || c.ProcessSort != ProcessSortCPU || c.ProcessThreshold != 90 || c.ProcessCountThreshold != 0 {
 		t.Errorf("process defaults = %d/%q/%g/%d, want 5/cpu/90/0",
 			c.ProcessCount, c.ProcessSort, c.ProcessThreshold, c.ProcessCountThreshold)
+	}
+	if c.PrometheusListen != "" {
+		t.Errorf("PrometheusListen = %q, want empty (disabled by default)", c.PrometheusListen)
 	}
 	if c.ConfigPath == "" {
 		t.Error("ConfigPath = empty, want resolved path")
@@ -135,6 +139,9 @@ func TestParseRejectsInvalid(t *testing.T) {
 		{"zero process count", []string{"-process-count", "0"}},
 		{"process threshold high", []string{"-process-threshold", "101"}},
 		{"negative process count threshold", []string{"-process-count-threshold", "-1"}},
+		{"bad prometheus listen missing port", []string{"-prometheus-listen", "9101"}},
+		{"bad prometheus listen port", []string{"-prometheus-listen", "127.0.0.1:99999"}},
+		{"bad prometheus listen non-numeric port", []string{"-prometheus-listen", "host:http"}},
 		{"unknown flag", []string{"-nope"}},
 	}
 	for _, tt := range tests {
@@ -351,6 +358,27 @@ func TestProcessMetricAutoEnable(t *testing.T) {
 				t.Errorf("Metrics = %q, hasProcess = %v, want %v", c.Metrics, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestPrometheusListenFlagAndEnv(t *testing.T) {
+	clearEnv(t)
+	c, err := Parse([]string{"-prometheus-listen", "127.0.0.1:9101"})
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if c.PrometheusListen != "127.0.0.1:9101" {
+		t.Errorf("PrometheusListen = %q, want 127.0.0.1:9101", c.PrometheusListen)
+	}
+
+	clearEnv(t)
+	t.Setenv("EY_PROMETHEUS_LISTEN", ":9101")
+	c, err = Parse(nil)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if c.PrometheusListen != ":9101" {
+		t.Errorf("PrometheusListen = %q, want :9101 from env", c.PrometheusListen)
 	}
 }
 

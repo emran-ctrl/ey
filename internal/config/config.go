@@ -4,6 +4,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"net"
 	"net/url"
 	"os"
 	"strconv"
@@ -87,6 +88,8 @@ type Config struct {
 	ProcessSort           ProcessSort
 	ProcessThreshold      float64
 	ProcessCountThreshold int
+
+	PrometheusListen string
 
 	Daemon   bool
 	Interval time.Duration
@@ -231,6 +234,8 @@ func (c *Config) register(fs *flag.FlagSet, d *Config, configPath string) (apply
 	fs.StringVar(&processSort, "process-sort", processSort, "Rank top processes by: cpu or memory")
 	fs.Float64Var(&c.ProcessThreshold, "process-threshold", floatDefault("process-threshold", "EY_PROCESS_THRESHOLD", d.ProcessThreshold), "Alert when the top process's usage percent (in the sort dimension) exceeds this")
 	fs.IntVar(&c.ProcessCountThreshold, "process-count-threshold", intDefault("process-count-threshold", "EY_PROCESS_COUNT_THRESHOLD", d.ProcessCountThreshold), "Alert when the total process count exceeds this (0 disables)")
+
+	fs.StringVar(&c.PrometheusListen, "prometheus-listen", stringDefault("EY_PROMETHEUS_LISTEN", d.PrometheusListen), "Expose Prometheus metrics on host:port in daemon mode (empty disables)")
 
 	fs.StringVar(&c.ConfigPath, "config", configPath, "Path to the YAML configuration file")
 
@@ -503,11 +508,30 @@ func (c *Config) validate() error {
 	if c.Path == "" {
 		return fmt.Errorf("-path must not be empty")
 	}
+	if c.PrometheusListen != "" {
+		if err := ValidateListenAddr(c.PrometheusListen); err != nil {
+			return fmt.Errorf("invalid -prometheus-listen %q: %w", c.PrometheusListen, err)
+		}
+	}
 	if c.Webhook != "" {
 		u, err := url.Parse(c.Webhook)
 		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
 			return fmt.Errorf("invalid -webhook URL %q: must be an absolute http(s) URL", c.Webhook)
 		}
+	}
+	return nil
+}
+
+// ValidateListenAddr checks that addr is a syntactically valid host:port with a
+// port in range. It does not bind, so conflicting ports are caught at startup.
+func ValidateListenAddr(addr string) error {
+	_, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return errors.New("must be a host:port address")
+	}
+	n, err := strconv.Atoi(port)
+	if err != nil || n < 1 || n > 65535 {
+		return fmt.Errorf("port %q must be a number between 1 and 65535", port)
 	}
 	return nil
 }

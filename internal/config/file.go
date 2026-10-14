@@ -54,6 +54,8 @@ type File struct {
 	ProcessSort           *string  `yaml:"process_sort,omitempty"`
 	ProcessThreshold      *float64 `yaml:"process_threshold,omitempty"`
 	ProcessCountThreshold *int     `yaml:"process_count_threshold,omitempty"`
+
+	PrometheusListen *string `yaml:"prometheus_listen,omitempty"`
 }
 
 // Duration marshals to and from a Go duration string such as "30s" or "10m".
@@ -189,6 +191,7 @@ func (f *File) applyTo(c *Config) {
 	setEnum(&c.ProcessSort, f.ProcessSort)
 	setFloat(&c.ProcessThreshold, f.ProcessThreshold)
 	setInt(&c.ProcessCountThreshold, f.ProcessCountThreshold)
+	setString(&c.PrometheusListen, f.PrometheusListen)
 }
 
 // Load returns the effective configuration from built-in defaults merged with
@@ -237,6 +240,7 @@ func FromConfig(c *Config) *File {
 		ProcessSort:           ptr(string(c.ProcessSort)),
 		ProcessThreshold:      ptr(c.ProcessThreshold),
 		ProcessCountThreshold: ptr(c.ProcessCountThreshold),
+		PrometheusListen:      ptr(c.PrometheusListen),
 	}
 }
 

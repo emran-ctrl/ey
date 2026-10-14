@@ -66,6 +66,7 @@ disk_threshold: 42
 interval: 30s
 alert_mode: cooldown
 color: always
+prometheus_listen: ":9101"
 `)
 	f, err := LoadFile(path)
 	if err != nil {
@@ -87,6 +88,9 @@ color: always
 	}
 	if c.Color != ColorAlways {
 		t.Errorf("Color = %q, want always", c.Color)
+	}
+	if c.PrometheusListen != ":9101" {
+		t.Errorf("PrometheusListen = %q, want :9101", c.PrometheusListen)
 	}
 }
 
@@ -146,6 +150,8 @@ func TestRoundTripWriteAndLoad(t *testing.T) {
 		ProcessSort:           ProcessSortMem,
 		ProcessThreshold:      65,
 		ProcessCountThreshold: 300,
+
+		PrometheusListen: ":9101",
 	}
 
 	path := filepath.Join(t.TempDir(), "nested", "config.yaml")
@@ -250,6 +256,7 @@ func TestMarshalIncludesAllKeys(t *testing.T) {
 		"interval", "alert_mode", "cooldown", "timeout", "retries",
 		"retry_backoff", "color",
 		"process_count", "process_sort", "process_threshold", "process_count_threshold",
+		"prometheus_listen",
 	} {
 		if !strings.Contains(string(data), key) {
 			t.Errorf("marshalled config missing key %q", key)

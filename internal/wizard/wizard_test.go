@@ -45,7 +45,7 @@ func runScript(t *testing.T, base *config.Config, lines []string) (*config.Confi
 
 func TestRunKeepsDefaults(t *testing.T) {
 	base := baseConfig()
-	lines := make([]string, 27)
+	lines := make([]string, 28)
 	got, err := runScript(t, base, lines)
 	if err != nil {
 		t.Fatalf("Run: %v", err)
@@ -78,6 +78,7 @@ func TestRunOverridesValues(t *testing.T) {
 		"no",                                   // quiet
 		"no",                                   // daemon
 		"10s",                                  // interval
+		":9101",                                // prometheus listen
 		"yes",                                  // exit code
 		"",                                     // state file
 		"no",                                   // no state
@@ -104,6 +105,7 @@ func TestRunOverridesValues(t *testing.T) {
 	want.Quiet = false
 	want.Daemon = false
 	want.Interval = 10 * time.Second
+	want.PrometheusListen = ":9101"
 	want.ExitCode = true
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("Run result mismatch:\n got: %+v\nwant: %+v", got, want)
@@ -137,6 +139,7 @@ func TestRunRePromptsUntilValid(t *testing.T) {
 		"",      // quiet
 		"",      // daemon
 		"",      // interval
+		"",      // prometheus listen
 		"",      // exit code
 		"",      // state file
 		"",      // no state
@@ -155,7 +158,7 @@ func TestRunRePromptsUntilValid(t *testing.T) {
 }
 
 func TestRunAbortsWhenDeclined(t *testing.T) {
-	lines := make([]string, 26)
+	lines := make([]string, 27)
 	lines = append(lines, "n")
 	_, err := runScript(t, baseConfig(), lines)
 	if !errors.Is(err, ErrAborted) {
@@ -168,10 +171,10 @@ func TestRunRejectsBadWebhookAndReprompts(t *testing.T) {
 		"", "", "", "", // disk, memory, cpu, path
 		"",             // metrics
 		"", "", "", "", // process count, sort, threshold, count threshold
-		"",                                                         // format
-		"ftp://bad",                                                // invalid webhook -> reprompt
-		"",                                                         // valid webhook (keep default = empty)
-		"", "", "", "", "", "", "", "", "", "", "", "", "", "", "", // remaining prompts (alert mode .. no state)
+		"",                                                             // format
+		"ftp://bad",                                                    // invalid webhook -> reprompt
+		"",                                                             // valid webhook (keep default = empty)
+		"", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", // remaining prompts (alert mode .. no state)
 		"y", // write
 	}
 	got, err := runScript(t, baseConfig(), lines)

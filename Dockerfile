@@ -22,5 +22,8 @@ COPY --from=build /out/ey /usr/local/bin/ey
 
 USER nonroot:nonroot
 
+# Prometheus scrape endpoint, enabled with -prometheus-listen :9101 (daemon mode).
+EXPOSE 9101
+
 ENTRYPOINT ["/usr/local/bin/ey"]
 CMD ["-json"]

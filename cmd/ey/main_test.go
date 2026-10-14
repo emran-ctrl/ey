@@ -1,12 +1,14 @@
 package main
 
 import (
+	"context"
 	"io"
 	"log/slog"
 	"path/filepath"
 	"testing"
 	"time"
 
+	"ey/internal/alerter"
 	"ey/internal/config"
 	"ey/internal/monitor"
 	"ey/internal/state"
@@ -118,5 +120,68 @@ func TestNextDelayOverrun(t *testing.T) {
 	}
 	if d := p.nextDelay(time.Millisecond, time.Now().Add(-time.Hour)); d != 0 {
 		t.Errorf("overran nextDelay = %s, want 0", d)
+	}
+}
+
+// fakeSink records the calls a metricsSink receives.
+type fakeSink struct {
+	observed int
+	errors   int
+	last     monitor.Snapshot
+}
+
+func (f *fakeSink) Observe(s monitor.Snapshot, _ []monitor.Breach) {
+	f.observed++
+	f.last = s
+}
+
+func (f *fakeSink) ObserveError(error) { f.errors++ }
+
+func newTestClient() *alerter.Client {
+	return alerter.New("", alerter.Options{Logger: testLogger()})
+}
+
+func TestStepFeedsSinkOnSuccess(t *testing.T) {
+	cfg := &config.Config{Path: t.TempDir(), Quiet: true, AlertMode: config.AlertAlways}
+	p := newAlertPolicy(cfg, nil, testLogger())
+	sink := &fakeSink{}
+	p.sink = sink
+
+	code := p.step(context.Background(), newTestClient(),
+		monitor.Thresholds{Disk: 100}, cfg, monitor.Selection{Disk: true}, 0, false)
+
+	if code != 0 {
+		t.Errorf("step code = %d, want 0", code)
+	}
+	if sink.observed != 1 || sink.errors != 0 {
+		t.Errorf("sink observed=%d errors=%d, want 1/0", sink.observed, sink.errors)
+	}
+	if sink.last.DiskTotalBytes == 0 {
+		t.Error("sink did not receive a populated snapshot")
+	}
+}
+
+func TestStepReportsCollectErrorToSink(t *testing.T) {
+	cfg := &config.Config{Path: filepath.Join(t.TempDir(), "does", "not", "exist"), Quiet: true}
+	p := newAlertPolicy(cfg, nil, testLogger())
+	sink := &fakeSink{}
+	p.sink = sink
+
+	code := p.step(context.Background(), newTestClient(),
+		monitor.Thresholds{}, cfg, monitor.Selection{Disk: true}, 0, false)
+
+	if code != 2 {
+		t.Errorf("step code = %d, want 2 on collect error", code)
+	}
+	if sink.errors != 1 || sink.observed != 0 {
+		t.Errorf("sink errors=%d observed=%d, want 1/0", sink.errors, sink.observed)
+	}
+}
+
+func TestRunPrometheusRequiresDaemon(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("EY_CONFIG", "")
+	if code := run([]string{"-prometheus-listen", ":9101", "-path", "/"}); code != 2 {
+		t.Errorf("run without -daemon = %d, want 2", code)
 	}
 }
