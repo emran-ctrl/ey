@@ -351,6 +351,9 @@ registered at all). All series use the `ey_` prefix:
 | `ey_memory_total_bytes` | | Total memory in bytes. |
 | `ey_memory_used_bytes` | | Used memory in bytes. |
 | `ey_cpu_used_percent` | | CPU used, as a percentage. |
+| `ey_process_count` | | Number of running processes. |
+| `ey_process_top_percent` | | Usage percent of the top process in the sort dimension (`cpu` or `memory`). |
+| `ey_process_count_threshold` | | Configured process count threshold (`0` disables the count check). |
 | `ey_threshold_percent` | `metric` | Configured threshold for the metric. |
 | `ey_threshold_breached` | `metric` | `1` when the metric exceeded its threshold, else `0`. |
 | `ey_last_collect_timestamp_seconds` | | Unix time of the last successful collection. |

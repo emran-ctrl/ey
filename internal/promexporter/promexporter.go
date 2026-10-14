@@ -51,6 +51,10 @@ type Exporter struct {
 
 	cpuUsedPercent prometheus.Gauge
 
+	processCount          prometheus.Gauge
+	processTopPercent     prometheus.Gauge
+	processCountThreshold prometheus.Gauge
+
 	thresholdPercent  *prometheus.GaugeVec
 	thresholdBreached *prometheus.GaugeVec
 
@@ -126,11 +130,24 @@ func New(opts Options) *Exporter {
 		e.cpuUsedPercent = e.gauge("cpu_used_percent", "CPU used, as a percentage.")
 		thresholds["cpu"] = opts.Thresholds.CPU
 	}
+	if opts.Selection.Process {
+		e.processCount = e.gauge("process_count", "Number of running processes.")
+		e.processTopPercent = e.gauge("process_top_percent", "Usage percent of the top process in the configured sort dimension (cpu or memory).")
+		e.processCountThreshold = e.gauge("process_count_threshold", "Configured process count threshold (0 disables the count check).")
+		e.processCountThreshold.Set(float64(opts.Thresholds.ProcessCount))
+		thresholds["process"] = opts.Thresholds.Process
+	}
 
 	for name, val := range thresholds {
 		e.selected[name] = true
 		e.thresholdPercent.WithLabelValues(name).Set(val)
 		e.thresholdBreached.WithLabelValues(name).Set(0)
+	}
+	// The process count threshold is a count, not a percentage, so it gets its
+	// own gauge and only participates in the threshold_breached series.
+	if opts.Selection.Process {
+		e.selected["process_count"] = true
+		e.thresholdBreached.WithLabelValues("process_count").Set(0)
 	}
 
 	return e
@@ -157,6 +174,10 @@ func (e *Exporter) Observe(s monitor.Snapshot, breaches []monitor.Breach) {
 	}
 	if e.cpuUsedPercent != nil {
 		e.cpuUsedPercent.Set(s.CPUUsedPercent)
+	}
+	if e.processCount != nil {
+		e.processCount.Set(float64(s.ProcessCount))
+		e.processTopPercent.Set(s.ProcessTopPercent)
 	}
 
 	breached := make(map[string]float64, len(e.selected))

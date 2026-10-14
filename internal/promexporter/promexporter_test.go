@@ -54,10 +54,60 @@ func TestNewRegistersOnlySelected(t *testing.T) {
 	for _, want := range []string{
 		"ey_disk_used_percent", "ey_memory_used_percent", "ey_memory_used_bytes",
 		"ey_cpu_used_percent",
+		"ey_process_count", "ey_process_top_percent", "ey_process_count_threshold",
 	} {
 		if !all[want] {
 			t.Errorf("all-metrics exporter missing %q", want)
 		}
+	}
+
+	// A disk-only exporter must not register process families.
+	for _, unwanted := range []string{
+		"ey_process_count", "ey_process_top_percent", "ey_process_count_threshold",
+	} {
+		if diskOnly[unwanted] {
+			t.Errorf("disk-only exporter unexpectedly exposed %q", unwanted)
+		}
+	}
+}
+
+func TestObserveProcess(t *testing.T) {
+	e := New(Options{
+		Selection:  monitor.Selection{Process: true},
+		Thresholds: monitor.Thresholds{Process: 90, ProcessCount: 500},
+	})
+	e.Observe(monitor.Snapshot{
+		ProcessCount:      312,
+		ProcessTopPercent: 42.5,
+	}, []monitor.Breach{{Metric: "process_count", Value: 312, Threshold: 500}})
+
+	checks := map[string]struct {
+		gauge prometheus.Collector
+		want  float64
+	}{
+		"process_count":           {e.processCount, 312},
+		"process_top_percent":     {e.processTopPercent, 42.5},
+		"process_count_threshold": {e.processCountThreshold, 500},
+	}
+	for name, c := range checks {
+		if got := testutil.ToFloat64(c.gauge); got != c.want {
+			t.Errorf("%s = %g, want %g", name, got, c.want)
+		}
+	}
+	if got := testutil.ToFloat64(e.thresholdPercent.WithLabelValues("process")); got != 90 {
+		t.Errorf("threshold_percent{process} = %g, want 90", got)
+	}
+	if got := testutil.ToFloat64(e.thresholdBreached.WithLabelValues("process_count")); got != 1 {
+		t.Errorf("breached{process_count} = %g after breach, want 1", got)
+	}
+	if got := testutil.ToFloat64(e.thresholdBreached.WithLabelValues("process")); got != 0 {
+		t.Errorf("breached{process} = %g, want 0", got)
+	}
+
+	// A subsequent clean cycle clears the process count breach.
+	e.Observe(monitor.Snapshot{ProcessCount: 100}, nil)
+	if got := testutil.ToFloat64(e.thresholdBreached.WithLabelValues("process_count")); got != 0 {
+		t.Errorf("breached{process_count} = %g after clear, want 0", got)
 	}
 }
 
